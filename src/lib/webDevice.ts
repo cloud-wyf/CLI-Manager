@@ -43,20 +43,6 @@ export interface WebDeviceOperation {
   updatedAt: number;
 }
 
-export interface WebHistorySessionSummary {
-  sessionId: string;
-  deviceId: string;
-  source: string;
-  projectKey: string;
-  title: string;
-  cwd: string | null;
-  createdAt: number;
-  updatedAt: number;
-  messageCount: number;
-  branch: string | null;
-  freshness: "live";
-}
-
 export interface WebWorkspaceSnapshot {
   groups: Array<{ id: string; name: string; parentId: string | null; sortOrder: number }>;
   projects: Array<{
@@ -88,8 +74,8 @@ export const webDeviceApi = {
   createPairing: () => invoke<{ code: string; expiresAt: number }>("web_device_create_pairing"),
   clearPairing: () => invoke<WebDeviceStatus>("web_device_clear_pairing"),
   takeOperations: () => invoke<WebDeviceOperation[]>("web_device_take_operations"),
-  publishHistory: (sessions: WebHistorySessionSummary[], workspace: WebWorkspaceSnapshot) =>
-    invoke<void>("web_device_publish_history", { request: { sessions, workspace } }),
+  publishWorkspace: (workspace: WebWorkspaceSnapshot) =>
+    invoke<void>("web_device_publish_history", { request: { sessions: [], workspace } }),
   validateContext: (rootPath: string, cwd: string) => invoke<void>("web_device_validate_context", { request: { rootPath, cwd } }),
   accepted: (operationId: string) => invoke<void>("web_device_operation_accepted", { request: { operationId } }),
   running: (operationId: string) => invoke<void>("web_device_operation_running", { request: { operationId } }),

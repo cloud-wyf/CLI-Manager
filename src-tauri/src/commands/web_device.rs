@@ -511,6 +511,7 @@ fn default_capabilities() -> Vec<String> {
         "conversation".to_string(),
         "conversation.start".to_string(),
         "conversation.prompt".to_string(),
+        "project.management".to_string(),
         "ssh.management".to_string(),
         "file.management".to_string(),
         "git.management".to_string(),
@@ -579,6 +580,7 @@ fn load_profile() -> Result<Option<WebDeviceProfile>, String> {
         profile.machine_id = crate::app_paths::machine_id()?;
     }
     profile.client_kind = client_kind().to_string();
+    profile.capabilities = default_capabilities();
     Ok(Some(profile))
 }
 

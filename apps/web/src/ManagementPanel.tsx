@@ -29,7 +29,7 @@ function csv(value: string): JsonValue[] {
 }
 
 export function isManagementOperation(operation: Operation): boolean {
-  return AREAS.some((area) => operation.kind.startsWith(`${area}.`));
+  return operation.kind.startsWith("project.") || AREAS.some((area) => operation.kind.startsWith(`${area}.`));
 }
 
 function fillTemplate(template: string, values: Record<string, string>): string {

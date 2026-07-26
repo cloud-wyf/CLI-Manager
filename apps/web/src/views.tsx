@@ -9,8 +9,6 @@ import {
   Clock3,
   Trash2,
   Folder,
-  FolderTree,
-  GitBranch,
   History,
   Languages,
   LoaderCircle,
@@ -33,10 +31,11 @@ import {
   X,
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import type { Device, HistorySessionSummary, JsonObject, Operation, OperationStatus, PairingState, ProjectContext, TimelineItem, WorkspaceGroup, WorkspaceProject, WorkspaceSnapshot } from "./domain";
+import type { Device, HistorySessionSummary, JsonObject, Operation, OperationStatus, PairingState, ProjectContext, TimelineItem, WorkspaceSnapshot } from "./domain";
 import type { TranslationKey } from "./i18n";
 import { deviceWallpaperUrl } from "./webClient";
 import { isManagementOperation, ManagementPanel } from "./ManagementPanel";
+import { ProjectTree } from "./ProjectTree";
 
 type T = (key: TranslationKey) => string;
 
@@ -376,169 +375,18 @@ export function Workbench(props: WorkbenchProps) {
   );
 }
 
-type WorkspaceTreeNode =
-  | { type: "group"; group: WorkspaceGroup; children: WorkspaceTreeNode[] }
-  | { type: "project"; project: WorkspaceProject };
-
-function buildWorkspaceTree(workspace: WorkspaceSnapshot): WorkspaceTreeNode[] {
-  const groupIds = new Set(workspace.groups.map((group) => group.id));
-  const groupsByParent = new Map<string | null, WorkspaceGroup[]>();
-  const projectsByGroup = new Map<string | null, WorkspaceProject[]>();
-  for (const group of workspace.groups) {
-    const parentId = group.parentId && groupIds.has(group.parentId) ? group.parentId : null;
-    const siblings = groupsByParent.get(parentId) ?? [];
-    siblings.push(group);
-    groupsByParent.set(parentId, siblings);
-  }
-  for (const project of workspace.projects) {
-    const groupId = project.groupId && groupIds.has(project.groupId) ? project.groupId : null;
-    const siblings = projectsByGroup.get(groupId) ?? [];
-    siblings.push(project);
-    projectsByGroup.set(groupId, siblings);
-  }
-  const sortItems = <T extends { sortOrder: number; name: string }>(items: T[]) =>
-    [...items].sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name));
-  const buildLevel = (parentId: string | null, ancestors: Set<string>): WorkspaceTreeNode[] => {
-    const nodes: WorkspaceTreeNode[] = [];
-    for (const group of sortItems(groupsByParent.get(parentId) ?? [])) {
-      if (ancestors.has(group.id)) continue;
-      const nextAncestors = new Set(ancestors).add(group.id);
-      nodes.push({
-        type: "group",
-        group,
-        children: buildLevel(group.id, nextAncestors),
-      });
-    }
-    nodes.push(...sortItems(projectsByGroup.get(parentId) ?? []).map((project) => ({ type: "project", project }) as const));
-    return nodes.sort((left, right) => {
-      const leftItem = left.type === "group" ? left.group : left.project;
-      const rightItem = right.type === "group" ? right.group : right.project;
-      return leftItem.sortOrder - rightItem.sortOrder || leftItem.name.localeCompare(rightItem.name);
-    });
-  };
-  return buildLevel(null, new Set());
-}
-
-function countWorkspaceProjects(nodes: WorkspaceTreeNode[]): number {
-  return nodes.reduce((count, node) => count + (node.type === "project" ? 1 : countWorkspaceProjects(node.children)), 0);
-}
-
 function ProjectSidebar(props: WorkbenchProps & { onPair: () => void }) {
-  const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(() => new Set());
-  const workspaceTree = useMemo(() => props.workspace ? buildWorkspaceTree(props.workspace) : [], [props.workspace]);
-  const legacyProjects = useMemo(() => Array.from(
-    props.projectContexts.reduce((groups, context) => {
-      const contexts = groups.get(context.projectKey) ?? [];
-      contexts.push(context);
-      groups.set(context.projectKey, contexts);
-      return groups;
-    }, new Map<string, ProjectContext[]>()),
-  ), [props.projectContexts]);
-
-  const toggleNode = (key: string) => {
-    setCollapsedNodes((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
-  const sessionsForContext = (context: ProjectContext | undefined) => context ? props.history.filter((session) => (
-    session.source === context.source && normalizePath(session.cwd) === normalizePath(context.cwd)
-  )) : [];
-
-  const renderSessions = (context: ProjectContext | undefined) => {
-    const sessions = sessionsForContext(context);
-    if (sessions.length === 0) return null;
-    return <div className="project-sessions">{sessions.map((session) => (
-      <button className={`project-session-row${props.selectedSession?.sessionId === session.sessionId ? " active" : ""}`} type="button" key={session.sessionId} onClick={() => props.onSelectSession(session.sessionId)} title={session.title}>
-        <MessageCircle size={13} /><span>{session.title}</span>
-      </button>
-    ))}</div>;
-  };
-
-  const renderWorkspaceNode = (node: WorkspaceTreeNode, depth = 0): ReactNode => {
-    if (node.type === "group") {
-      const key = `group:${node.group.id}`;
-      const collapsed = collapsedNodes.has(key);
-      return <section className="workspace-group" key={key}>
-        <button className="workspace-group-row" style={{ paddingLeft: 7 + depth * 13 }} type="button" onClick={() => toggleNode(key)} aria-expanded={!collapsed}>
-          {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-          <FolderTree size={16} />
-          <strong>{node.group.name}</strong>
-          <span className="project-node-count">{countWorkspaceProjects(node.children)}</span>
-        </button>
-        {!collapsed && node.children.map((child) => renderWorkspaceNode(child, depth + 1))}
-      </section>;
-    }
-
-    const project = node.project;
-    const context = props.projectContexts.find((item) => item.projectId === project.id && !item.worktreeId);
-    const worktrees = props.workspace?.worktrees.filter((item) => item.projectId === project.id) ?? [];
-    const projectSessions = sessionsForContext(context);
-    const key = `project:${project.id}`;
-    const hasChildren = worktrees.length > 0 || projectSessions.length > 0;
-    const collapsed = collapsedNodes.has(key);
-    const active = props.selectedProjectContext?.projectId === project.id;
-    const selectable = Boolean(context);
-    return <section className={`project-node workspace-project${active ? " active" : ""}`} key={key} style={{ marginLeft: depth * 13 }}>
-      <div className="workspace-project-line">
-        {hasChildren ? <button className="tree-toggle" type="button" onClick={() => toggleNode(key)} aria-expanded={!collapsed} aria-label={project.name}>
-          {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-        </button> : <span className="tree-toggle-placeholder" />}
-        <button className={`project-context-row workspace-project-row${active ? " active" : ""}`} type="button" disabled={!selectable} onClick={() => context && props.onSelectProjectContext(context.key)} title={project.cwd ?? project.name}>
-          <Folder size={16} />
-          <span><strong>{project.name}</strong><small>{project.source ?? project.environmentType}</small></span>
-          {selectable && <span className="freshness-dot live" role="img" aria-label={props.t("liveData")} />}
-        </button>
-      </div>
-      {!collapsed && <div className="workspace-project-children">
-        {renderSessions(context)}
-        {worktrees.map((worktree) => {
-          const worktreeContext = props.projectContexts.find((item) => item.worktreeId === worktree.id);
-          return <div className="project-context-node workspace-worktree" key={worktree.id}>
-            <button className={`project-context-row${props.selectedProjectContext?.worktreeId === worktree.id ? " active" : ""}`} type="button" disabled={!worktreeContext} onClick={() => worktreeContext && props.onSelectProjectContext(worktreeContext.key)} title={worktree.cwd}>
-              <GitBranch size={15} />
-              <span><strong>{worktree.name}</strong><small>{worktree.branch}</small></span>
-              {worktree.status === "active" && <span className="freshness-dot live" role="img" aria-label={props.t("liveData")} />}
-            </button>
-            {renderSessions(worktreeContext)}
-          </div>;
-        })}
-      </div>}
-    </section>;
-  };
-
   return (
     <aside className="sidebar project-sidebar" aria-label={props.t("projects")}>
       <div className="sidebar-brand"><AppLogo /><strong>CLI-Manager</strong></div>
       <button className="new-chat-button" type="button" onClick={() => props.onSelectSession(undefined)}><Plus size={18} /><span>{props.t("newConversation")}</span></button>
       <div className="project-tree">
-        <div className="side-section-title"><span>{props.t("projects")}</span><span className="count">{props.workspace?.projects.length ?? legacyProjects.length}</span></div>
-        {props.workspace
-          ? (workspaceTree.length === 0 ? <p className="empty-copy">{props.t("noProjectContext")}</p> : workspaceTree.map((node) => renderWorkspaceNode(node)))
-          : legacyProjects.map(([projectKey, contexts]) => <section className="project-node" key={projectKey}>
-              <div className="project-node-header"><ChevronDown size={15} /><FolderTree size={17} /><strong>{projectKey}</strong><span className="project-node-count">{contexts.length}</span></div>
-              <div className="project-branches">{contexts.map((context) => <div className="project-context-node" key={context.key}>
-                <button className={`project-context-row${props.selectedProjectContext?.key === context.key ? " active" : ""}`} type="button" onClick={() => props.onSelectProjectContext(context.key)} title={context.cwd}>
-                  <Folder size={16} /><span><strong>{pathLeaf(context.cwd) || context.projectKey}</strong><small><GitBranch size={11} />{context.branch ?? context.source}</small></span><span className={`freshness-dot ${context.freshness}`} />
-                </button>
-                {renderSessions(context)}
-              </div>)}</div>
-            </section>)}
+        <div className="side-section-title"><span>{props.t("projects")}</span><span className="count">{props.workspace?.projects.length ?? 0}</span></div>
+        <ProjectTree t={props.t} workspace={props.workspace} projectContexts={props.projectContexts} selectedProjectContext={props.selectedProjectContext} dragEnabled={Boolean(props.selectedDevice?.status === "online" && props.selectedDevice.capabilities.includes("project.management"))} onSelectProjectContext={props.onSelectProjectContext} onSubmit={props.onSubmitManagement} onReload={props.onRefresh} />
       </div>
       <div className="sidebar-footer"><button className="footer-row" type="button" onClick={props.onPair}><Monitor size={20} /><span>{props.t("pairDevice")}</span></button><button className="account-row" type="button" onClick={props.onLogout}><span className="avatar">{props.userName.slice(0, 1).toUpperCase()}</span><span>{props.userName}</span><LogOut size={16} /></button></div>
     </aside>
   );
-}
-
-function normalizePath(path: string | null | undefined) {
-  return path?.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() ?? "";
-}
-
-function pathLeaf(path: string) {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() ?? path;
 }
 
 function HistoryList({ t, items, selectedId, onSelect }: { t: T; items: HistorySessionSummary[]; selectedId?: string; onSelect: (id: string) => void }) {

@@ -819,6 +819,7 @@ fn load_profile() -> Result<Option<Profile>, String> {
         profile.machine_id = crate::app_paths::machine_id()?;
     }
     profile.client_kind = client_kind().to_string();
+    profile.capabilities = default_capabilities();
     Ok(Some(profile))
 }
 
@@ -901,6 +902,7 @@ fn default_capabilities() -> Vec<String> {
         "conversation",
         "conversation.start",
         "conversation.prompt",
+        "project.management",
         "ssh.management",
         "file.management",
         "git.management",

@@ -13,7 +13,7 @@ import { appendResumeCliArgs, resolveProjectStartupCommand } from "../lib/projec
 import { getProviderSwitchAppType } from "../lib/providerSwitching";
 import { logWarn } from "../lib/logger";
 import { translateCurrent } from "../lib/i18n";
-import { webDeviceApi, type WebDeviceOperation, type WebHistorySessionSummary, type WebWorkspaceSnapshot } from "../lib/webDevice";
+import { webDeviceApi, type WebDeviceOperation, type WebWorkspaceSnapshot } from "../lib/webDevice";
 import {
   executeWebManagementOperation,
   isWebManagementOperation,
@@ -23,7 +23,7 @@ import {
 
 const OPERATION_EVENT = "web-device-operation-ready";
 const OPERATION_POLL_MS = 1_000;
-const HISTORY_PUBLISH_MS = 60_000;
+const WORKSPACE_PUBLISH_MS = 60_000;
 const CLI_START_TIMEOUT_MS = 60_000;
 const OPERATION_TIMEOUT_MS = 30 * 60_000;
 const MAX_PROMPT_LENGTH = 64 * 1024;
@@ -155,6 +155,7 @@ function isManagementRejection(code: string) {
     || code.endsWith("_forbidden")
     || code.endsWith("_not_found")
     || code.endsWith("_unsupported")
+    || code.endsWith("_conflict")
     || code === "path_outside_root"
     || code === "target_exists"
     || code === "worktree_missing"
@@ -302,27 +303,12 @@ async function drainOperations() {
   }
 }
 
-async function publishHistory() {
+async function publishWorkspace() {
   try {
-    const historyStore = useHistoryStore.getState();
-    await historyStore.loadSessions();
     const projectStore = useProjectStore.getState();
     if (!projectStore.loaded) await projectStore.fetchAll("startup");
     const status = await webDeviceApi.getStatus();
     if (!status.paired || !status.connected || !status.profile) return;
-    const sessions: WebHistorySessionSummary[] = useHistoryStore.getState().sessions.map((session) => ({
-      sessionId: session.session_id,
-      deviceId: status.profile!.clientId,
-      source: session.source,
-      projectKey: session.project_key,
-      title: session.displayTitle || session.title,
-      cwd: session.cwd?.trim() || null,
-      createdAt: session.created_at,
-      updatedAt: session.updated_at,
-      messageCount: session.message_count,
-      branch: session.branch ?? null,
-      freshness: "live",
-    }));
     const { groups, projects, worktrees } = useProjectStore.getState();
     const workspace: WebWorkspaceSnapshot = {
       groups: groups.map((group) => ({
@@ -350,9 +336,9 @@ async function publishHistory() {
       })),
       updatedAt: Date.now(),
     };
-    await webDeviceApi.publishHistory(sessions, workspace);
+    await webDeviceApi.publishWorkspace(workspace);
   } catch (caught) {
-    logWarn("Failed to publish Web device history", caught);
+    logWarn("Failed to publish Web device workspace", caught);
   }
 }
 
@@ -382,18 +368,18 @@ export function useWebDeviceBridge(ready: boolean) {
     if (!ready) return;
     const unlisten = listen(OPERATION_EVENT, () => void drainOperations());
     void drainOperations();
-    void publishHistory();
+    void publishWorkspace();
     let workspacePublishTimer: number | null = null;
     const unsubscribeProjects = useProjectStore.subscribe((state, previous) => {
       if (state.groups === previous.groups && state.projects === previous.projects && state.worktrees === previous.worktrees) return;
       if (workspacePublishTimer !== null) window.clearTimeout(workspacePublishTimer);
-      workspacePublishTimer = window.setTimeout(() => void publishHistory(), 300);
+      workspacePublishTimer = window.setTimeout(() => void publishWorkspace(), 300);
     });
     const operationTimer = window.setInterval(() => void drainOperations(), OPERATION_POLL_MS);
-    const historyTimer = window.setInterval(() => void publishHistory(), HISTORY_PUBLISH_MS);
+    const workspaceTimer = window.setInterval(() => void publishWorkspace(), WORKSPACE_PUBLISH_MS);
     return () => {
       window.clearInterval(operationTimer);
-      window.clearInterval(historyTimer);
+      window.clearInterval(workspaceTimer);
       if (workspacePublishTimer !== null) window.clearTimeout(workspacePublishTimer);
       unsubscribeProjects();
       void unlisten.then((dispose) => dispose());

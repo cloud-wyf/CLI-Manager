@@ -9,6 +9,7 @@ import { findProjectByPath, findWorktreeByPath } from "./terminalProject";
 import { webDeviceApi, type WebDeviceOperation } from "./webDevice";
 
 const MANAGEMENT_KINDS = new Set([
+  "project.tree.reorder",
   "ssh.hosts.list", "ssh.client_status", "ssh.test_connection", "ssh.check_path", "ssh.list_directories",
   "ssh.host.create", "ssh.host.update", "ssh.host.delete",
   "file.list", "file.search", "file.search_content", "file.create", "file.create_directory",
@@ -35,6 +36,13 @@ type LocalContext = {
   project: Project;
   worktree: WorktreeRecord | null;
   rootPath: string;
+};
+
+type ProjectTreeOrder = {
+  itemType: "group" | "project";
+  itemId: string;
+  targetParentId: string | null;
+  orderedIds: string[];
 };
 
 function managementError(code: string, message = code): never {
@@ -95,6 +103,62 @@ function requireConfirmation(operation: WebDeviceOperation, payload: Payload) {
   if (operation.kind === "ssh.test_connection" && payload.acceptNewHostKey === true && payload.confirmed !== true) {
     managementError("operation_confirmation_required", "accepting a new SSH host key requires confirmation");
   }
+}
+
+async function projectTreeOrder(payload: Payload): Promise<ProjectTreeOrder> {
+  const projectStore = useProjectStore.getState();
+  if (!projectStore.loaded) await projectStore.fetchAll("startup");
+  const { groups, projects } = useProjectStore.getState();
+  const itemType = requiredString(payload, "itemType", 16);
+  if (itemType !== "group" && itemType !== "project") {
+    managementError("invalid_operation_payload", "itemType is invalid");
+  }
+  const itemId = requiredString(payload, "itemId", 128);
+  const targetValue = payload.targetParentId;
+  if (targetValue !== null && targetValue !== undefined && typeof targetValue !== "string") {
+    managementError("invalid_operation_payload", "targetParentId is invalid");
+  }
+  const targetParentId = optionalString(payload, "targetParentId", 128) ?? null;
+  const orderedIds = stringArray(payload, "orderedIds", 1_000);
+  if (new Set(orderedIds).size !== orderedIds.length) {
+    managementError("invalid_operation_payload", "orderedIds contains duplicates");
+  }
+  if (new Set([...groups.map((group) => group.id), ...projects.map((project) => project.id)]).size !== groups.length + projects.length) {
+    managementError("project_tree_conflict", "project tree contains colliding ids");
+  }
+  if (targetParentId && !groups.some((group) => group.id === targetParentId)) {
+    managementError("project_tree_conflict", "target group no longer exists");
+  }
+  if (itemType === "group") {
+    if (!groups.some((group) => group.id === itemId)) managementError("project_tree_conflict", "group no longer exists");
+    let ancestorId = targetParentId;
+    while (ancestorId) {
+      if (ancestorId === itemId) managementError("invalid_operation_payload", "group cannot move into itself or a descendant");
+      ancestorId = groups.find((group) => group.id === ancestorId)?.parent_id ?? null;
+    }
+  } else if (!projects.some((project) => project.id === itemId)) {
+    managementError("project_tree_conflict", "project no longer exists");
+  }
+
+  const expectedIds = [
+    ...groups.filter((group) => group.parent_id === targetParentId && group.id !== itemId).map((group) => group.id),
+    ...projects.filter((project) => project.group_id === targetParentId && project.id !== itemId).map((project) => project.id),
+    itemId,
+  ];
+  const expected = new Set(expectedIds);
+  if (orderedIds.length !== expected.size || orderedIds.some((id) => !expected.has(id))) {
+    managementError("project_tree_conflict", "project tree changed; refresh before reordering");
+  }
+  return { itemType, itemId, targetParentId, orderedIds };
+}
+
+async function executeProjectTree(payload: Payload): Promise<unknown> {
+  const order = await projectTreeOrder(payload);
+  const store = useProjectStore.getState();
+  if (order.itemType === "group") await store.moveGroupToParent(order.itemId, order.targetParentId);
+  else await store.moveProjectToGroup(order.itemId, order.targetParentId);
+  await useProjectStore.getState().reorderItems(order.targetParentId, order.orderedIds);
+  return { reordered: true };
 }
 
 async function resolveLocalContext(payload: Payload): Promise<LocalContext> {
@@ -410,6 +474,11 @@ export async function validateWebManagementOperation(operation: WebDeviceOperati
   const payload = payloadObject(operation);
   requireConfirmation(operation, payload);
 
+  if (operation.kind.startsWith("project.")) {
+    await projectTreeOrder(payload);
+    return;
+  }
+
   if (operation.kind.startsWith("ssh.")) {
     if (operation.kind === "ssh.client_status") return;
     await ensureSshHostsLoaded();
@@ -507,6 +576,7 @@ export function webManagementOperationNeedsConfirmation(operation: WebDeviceOper
 export async function executeWebManagementOperation(operation: WebDeviceOperation, validated = false): Promise<unknown> {
   if (!validated) await validateWebManagementOperation(operation);
   const payload = payloadObject(operation);
+  if (operation.kind.startsWith("project.")) return executeProjectTree(payload);
   if (operation.kind.startsWith("ssh.")) return executeSsh(operation, payload);
   if (operation.kind.startsWith("file.")) return executeFile(operation, payload);
   if (operation.kind.startsWith("git.")) return executeGit(operation, payload);

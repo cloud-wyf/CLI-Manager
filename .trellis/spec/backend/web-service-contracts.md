@@ -38,7 +38,7 @@
 | `web_device_start/stop/restart` | Controls the Rust-owned device worker independently of React lifecycle |
 | `web_device_create_pairing/clear_pairing` | Creates a short-lived code or revokes the credential and rotates `clientId` |
 | `web_device_take_operations` | Returns the bounded, deduplicated desktop operation queue |
-| `web_device_publish_history` | Sends a full `HistorySnapshot { sessions, workspace }`; `workspace` contains desktop groups, projects, and Worktrees |
+| `web_device_publish_history` | Compatibility command that sends `HistorySnapshot { sessions: [], workspace }`; `workspace` contains desktop groups, projects, and Worktrees |
 | `web_device_validate_context` | Canonicalizes native/WSL roots and rejects a `cwd` outside the registered project or Worktree |
 | `web_device_operation_accepted/running/completed` | Emits device-authoritative operation state frames |
 
@@ -81,7 +81,7 @@
 - Replacing a device connection shuts down the older generation; only the current connection may ingest state.
 - Device send queues are bounded. Queue failure closes the connection; cleanup marks the current generation offline.
 - Desktop keeps delivered operations until a server `OperationAck` confirms the state update. If the local operation queue overflows, it keeps the connection alive long enough to consume ACKs, then reconnects after capacity is recovered so the server can resend deferred operations.
-- History snapshot sequence is per `(device, history)` and full snapshots replace missing sessions atomically. The same frame may carry an optional desktop workspace snapshot (groups, projects, and Worktrees); the server stores it atomically with the accepted history sequence, and `/history` returns it separately from session items. Legacy frames without `workspace` remain valid.
+- Workspace publication reuses the per-device history sequence and sends an empty full session list plus the desktop workspace snapshot (groups, projects, and Worktrees). The server therefore clears legacy session summaries and stores workspace atomically with the accepted sequence; `/history` returns an empty session list and the workspace separately. Legacy frames without `workspace` remain valid.
 - Tauri owns `/ws/device`, heartbeat, reconnect, pairing, history, and outbound queues in Rust; hiding, minimizing, or unmounting a settings component must not stop the connection.
 - When `cli-manager-web-daemon` is available, it owns `/ws/device`, heartbeat, reconnect, pairing, history, and outbound queues; Tauri remains the local operation executor and keeps the existing command/event surface.
 - The non-secret installed profile is `.cli-manager/web-device.json`; Dev uses `.cli-manager/web-device.dev.json`. Both share `.cli-manager/machine-id`, while each profile owns a distinct stable `clientId`. `deviceToken` is keyed by `clientId` in the native credential store and must never enter a WebView payload, log, SQLite row, or JSON profile.
@@ -105,7 +105,7 @@ running -> succeeded | failed | rejected
 non-terminal -> canceled | timed_out
 ```
 
-- Enabled kinds cover `conversation.*`, `ssh.*`, `file.*`, `git.*`, `worktree.*`, and `hook.*`; the selected device must advertise the matching capability.
+- Enabled kinds cover `conversation.*`, `project.tree.reorder`, `ssh.*`, `file.*`, `git.*`, `worktree.*`, and `hook.*`; the selected device must advertise the matching capability.
 - Offline devices reject new operations with `device_offline`; the browser must keep the draft local.
 - Same `(user,idempotencyKey)` with different device, kind, or payload returns `idempotency_conflict`.
 - An exact idempotency hit is returned before re-checking the device's current capability or online state.
@@ -114,7 +114,8 @@ non-terminal -> canceled | timed_out
 - Before launch, desktop must match the payload against its registered project/Worktree, CLI source, installed Hook, and canonical path boundary. `conversation.prompt` additionally must match the desktop history session; `conversation.start` and management operations must work for registered projects that have no history yet. SSH projects remain rejected in P0.
 - Desktop sends the Prompt only after the matching CLI reports `SessionStart`. `Stop` is the success authority and `StopFailure` is the failure authority.
 - Pure validation failure or a desktop user denial may transition directly from `submitted/waiting_device` to `rejected`; no side effect may start first.
-- `payload.confirmed=true` records browser intent only. Every management write, Git Fetch, and SSH new-host-key acceptance must also receive a native desktop confirmation that cannot be forged by the remote browser.
+- `payload.confirmed=true` records browser intent only. Dangerous management writes, Git Fetch, and SSH new-host-key acceptance must also receive a native desktop confirmation that cannot be forged by the remote browser. `project.tree.reorder` is the only confirmation-free metadata write: desktop validates the complete sibling ID set and group ancestry before persisting it.
+- `project.tree.reorder` carries `itemType`, `itemId`, nullable `targetParentId`, and the complete `orderedIds` for that level. Desktop is authoritative, rejects stale/missing/duplicate/colliding IDs and group cycles, then reuses the existing project Store move/reorder actions. Worktrees are never draggable.
 - Management operations execute serially in the desktop bridge. Files/Git/Worktree paths are resolved from registered desktop project/Worktree state, not from history presence or a browser-provided root.
 - Operation results use Web-specific DTOs: never return SSH credentials, identity/proxy paths, raw OpenSSH stderr, local Worktree paths, Hook config paths, or database paths.
 - Hook `status/test` always use `autoRepair=false`; Web cannot choose Hook directories.
@@ -132,6 +133,7 @@ non-terminal -> canceled | timed_out
 | Unknown user device | `device_not_found` |
 | Offline user device | `device_offline` |
 | Unsupported operation or blank prompt | `unsupported_operation_kind` / `invalid_operation_payload` |
+| Stale/invalid project tree order or group cycle | `project_tree_conflict` / `invalid_operation_payload`; no partial reorder |
 | Missing browser intent flag for a managed write | `operation_confirmation_required` before dispatch |
 | Desktop user rejects a managed write | Terminal `rejected` with no local side effect |
 | Local operation queue reaches its bound | Defer excess requests, consume ACKs, reconnect after capacity recovers |
@@ -150,6 +152,7 @@ non-terminal -> canceled | timed_out
 - Good: browser reconnects with sequence 42, receives persisted events 43..N, then live events without gaps or duplicates.
 - Good: online operation stays submitted until desktop accepted/running/final frames arrive.
 - Good: a desktop project with no history session still appears in the Web tree because project navigation comes from `workspace.projects`, not from `history_sessions`.
+- Good: Web project navigation never renders session rows; dragging a project or group writes through the desktop Store and the next workspace snapshot confirms the final order.
 - Good: desktop groups and Worktrees preserve their IDs and hierarchy while only safe display/launch context fields cross the device boundary.
 - Good: installed and Dev clients run concurrently on one machine with different `clientId` values and the same `machineId`; reconnecting either client does not replace the other connection or workspace snapshot.
 - Base: dispatch races with a disconnect; operation becomes `waiting_device` and is resent after device reconnect.
@@ -166,6 +169,7 @@ non-terminal -> canceled | timed_out
 - Bad: treat `payload.confirmed` as authorization, expose native paths/SSH stderr in results, or remove a local operation before its server ACK.
 - Bad: overwrite `_sqlx_migrations.checksum` for an unknown mismatch or rerun an already-applied migration.
 - Bad: derive the Web project tree from history rows, or upload full desktop `Project` records containing `env_vars`, startup commands, credential references, or provider overrides.
+- Bad: accept a browser-provided partial sibling list, persist Web-only ordering, allow Worktree dragging, or move a group into itself/its descendants.
 
 ## 6. Tests Required
 

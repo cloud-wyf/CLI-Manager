@@ -20,6 +20,7 @@ const MAX_OPERATION_PAYLOAD_BYTES: usize = 256 * 1024;
 const ENABLED_OPERATION_KINDS: &[&str] = &[
     "conversation.start",
     "conversation.prompt",
+    "project.tree.reorder",
     "ssh.hosts.list",
     "ssh.client_status",
     "ssh.test_connection",
@@ -221,7 +222,11 @@ pub async fn remove_device(
     Path(device_id): Path<String>,
 ) -> Result<Json<OkResponse>, AppError> {
     let user = require_user(&state, &headers).await?;
-    if !state.storage.remove_device_for_user(&user.id, &device_id).await? {
+    if !state
+        .storage
+        .remove_device_for_user(&user.id, &device_id)
+        .await?
+    {
         return Err(AppError::not_found("device_not_found", "device not found"));
     }
     Ok(Json(OkResponse { ok: true }))
@@ -581,6 +586,7 @@ fn validate_operation_request(request: &CreateOperationRequest) -> Result<(), Ap
 fn operation_capability(kind: &str) -> &'static str {
     match kind.split_once('.').map(|(prefix, _)| prefix) {
         Some("conversation") => "conversation",
+        Some("project") => "project.management",
         Some("ssh") => "ssh.management",
         Some("file") => "file.management",
         Some("git") => "git.management",
@@ -653,6 +659,20 @@ mod tests {
         ))
         .is_ok());
         assert_eq!(operation_capability("hook.status"), "hook.management");
+        assert!(validate_operation_request(&request(
+            "project.tree.reorder",
+            serde_json::json!({
+                "itemType": "project",
+                "itemId": "project-1",
+                "targetParentId": null,
+                "orderedIds": ["project-1"]
+            }),
+        ))
+        .is_ok());
+        assert_eq!(
+            operation_capability("project.tree.reorder"),
+            "project.management"
+        );
     }
 
     #[test]

@@ -408,7 +408,7 @@ export function useAppModel() {
     }
     const idempotencyKey = crypto.randomUUID();
     const contextualPayload: JsonObject = { ...payload };
-    if (!kind.startsWith("ssh.") && !kind.startsWith("hook.")) {
+    if (!kind.startsWith("ssh.") && !kind.startsWith("hook.") && !kind.startsWith("project.")) {
       if (!selectedProjectContext) {
         throw new ApiError("project_context_required", "project context is required", 400);
       }
