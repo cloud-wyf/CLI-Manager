@@ -123,7 +123,8 @@ finally {
     )
 }
 
-$frontendCommand = "npm run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort"
+# npm.ps1 consumes the standalone `--`, turning Vite options into positional arguments.
+$frontendCommand = "npm.cmd run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort"
 $frontend = Start-Process `
     -FilePath $shellPath `
     -WorkingDirectory $webRoot `
