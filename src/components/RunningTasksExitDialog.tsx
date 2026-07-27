@@ -20,7 +20,7 @@ interface Props {
   onClose: () => void;
 }
 
-/** 退出时存在运行中任务的询问弹窗（Issue #123 Phase 1）。 */
+/** 退出时存在运行中任务的询问弹窗（Issue #123 Phase 1/2）。 */
 export function RunningTasksExitDialog({ open, runningCount, onBackground, onMinimize, onDiscard, onClose }: Props) {
   const { t } = useI18n();
   const [action, setAction] = useState<RunningTasksExitAction>("background");

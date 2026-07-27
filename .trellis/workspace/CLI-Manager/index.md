@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 31
-- **Last Active**: 2026-07-22
+- **Total Sessions**: 34
+- **Last Active**: 2026-07-24
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1058 | Active |
+| `journal-1.md` | ~1154 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,7 +29,10 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
-| 31 | 2026-07-22 | 修复 Web Server 迁移校验漂移 | `2663048e` | `feat/web-management-capabilities` |
+| 34 | 2026-07-22 | 修复 Web Server 迁移校验漂移 | `2663048e` | `feat/web-management-capabilities` |
+| 33 | 2026-07-24 | 完善终端 Tab 悬浮信息卡 | `592729e9` | `master` |
+| 32 | 2026-07-23 | 修复跨 Workspan 终端空白 | `5cd5011d` | `master` |
+| 31 | 2026-07-23 | 修复 Codex 子任务窗格自动关闭 | `0347ab8e` | `master` |
 | 30 | 2026-07-22 | 文件预览熔断保护 | `9ca8c923` | `master` |
 | 29 | 2026-07-22 | CLI 启动参数历史与同步 | `79a6f9d` | `master` |
 | 28 | 2026-07-21 | 修复终端图片插件 WASM CSP 崩溃 | `b457aa9` | `master` |

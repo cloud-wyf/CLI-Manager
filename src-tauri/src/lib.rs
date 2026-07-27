@@ -18,6 +18,7 @@ mod git_watcher;
 pub mod hook_client;
 mod linux_graphics;
 mod log_rotation;
+mod process_job;
 pub mod pty;
 mod shell_resolver;
 mod ssh_agent_supply_chain;
@@ -769,6 +770,10 @@ pub fn run() {
             }
             LogBuilder::new()
                 .level(log_level)
+                .level_for("h2", LevelFilter::Warn)
+                .level_for("hyper", LevelFilter::Warn)
+                .level_for("hyper_util", LevelFilter::Warn)
+                .level_for("reqwest", LevelFilter::Warn)
                 .level_for("sqlx", LevelFilter::Info)
                 .timezone_strategy(TimezoneStrategy::UseLocal)
                 .targets(targets)
@@ -951,6 +956,8 @@ pub fn run() {
             commands::ssh::ssh_agent_hook_inspect,
             commands::ssh::ssh_agent_hook_preview,
             commands::ssh::ssh_agent_hook_apply,
+            commands::ssh_integration::ssh_agent_record_hook_report,
+            commands::ssh_integration::ssh_agent_save_host_preferences,
             commands::ssh::ssh_save_password,
             commands::ssh::ssh_password_status,
             commands::ssh::ssh_delete_password,
@@ -960,12 +967,14 @@ pub fn run() {
             commands::ssh_db::ssh_db_delete_group,
             commands::ssh_db::ssh_db_save_host_preferences,
             commands::ssh_db::ssh_db_record_hook_report,
+            commands::ssh_db::ssh_db_record_history_source,
             commands::ssh::ssh_check_path,
             commands::ssh::ssh_list_directories,
             commands::ssh_config::ssh_config_default_directory,
             commands::ssh_config::ssh_config_import_preview,
             commands::third_party_notification::third_party_notification_test_send,
             commands::logging::set_debug_logging,
+            commands::fs::clipboard_read_file_paths,
             commands::fs::check_paths_exist,
             commands::fs::file_get_path_kind,
             commands::fs::file_watch_start,
@@ -1087,6 +1096,8 @@ pub fn run() {
             commands::hook_settings::hook_settings_uninstall_codex,
             commands::hook_settings::hook_settings_install_pi,
             commands::hook_settings::hook_settings_uninstall_pi,
+            commands::hook_settings::hook_settings_install_grok,
+            commands::hook_settings::hook_settings_uninstall_grok,
             commands::hook_settings::hook_settings_select_dir,
             commands::ccusage::ccusage_get_status,
             commands::ccusage::ccusage_install_tools,

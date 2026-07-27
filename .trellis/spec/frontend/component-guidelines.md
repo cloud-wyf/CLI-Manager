@@ -13,10 +13,28 @@
 - `TerminalProcessManager` owns every received frame until xterm's write callback commits it. Component cleanup must only detach the consumer; it must not discard or persist-and-duplicate uncommitted frames.
 - Live frames may be combined for one xterm write, but completion commits and ACKs the constituent frames in sequence order using each frame's raw UTF-16 length.
 - A remounted Display receives all uncommitted frames again. Commit callbacks from an older attachment generation are ignored.
+- When a layout/workspan migration remounts a Display, its layout-effect cleanup must serialize the xterm buffer; the new Display restores that snapshot and completes its first fit/refresh before subscribing to PTY output. Do not arm the new Display's unmount snapshot callback until that restore completes: React StrictMode may dispose the probe mount while its initial write is still pending, and serializing that empty probe would overwrite the valid source snapshot. Committed frames are not replayed by the manager, so subscribing before restore can leave an idle shell visually blank.
 - Closing the last attached session cancels any scheduled reconnect; a delayed reconnect callback must return without opening a socket when no non-tombstoned sessions remain.
 - No component or store may call `listen("pty-output-...")` or invoke `pty_write/pty_resize/pty_close` directly.
 - Large-buffer horizontal resize uses a leading + trailing latest-wins cadence capped at 34ms; vertical resize remains immediate. Consecutive `ResizeObserver` frames replace only the pending fit RAF and must not cancel that horizontal cadence. macOS/Linux enable xterm cursor-line reflow so a rapid shrink does not expose the old-width cursor row while waiting for the PTY application's `SIGWINCH` redraw; Windows keeps the existing ConPTY compatibility policy. Shrink and grow must both expose xterm's live resize as soon as its queued render is ready. Immediately before each visible horizontal shrink, keep a pixel copy of the last stable `.xterm-screen` above the hidden live screen, but display that copy at its original CSS size inside an overflow-clipped viewport; never stretch the bitmap or hold it for the whole drag. Reveal the live renderer after two animation frames, and restart only this two-frame guard if another `Terminal.resize()` arrives first. `ResizeObserver` events that occur while waiting for the next throttled terminal resize may update the clip bounds but must not delay the reveal. WebGL must preserve its drawing buffer for this copy, and the barrier must validate that a captured frame contains visible pixels before hiding the live screen; a failed/empty capture leaves the live renderer visible. Capture geometry and visibility belong to `.xterm-screen`; root-level canvas lookup is only a compatibility fallback and must exclude the overview ruler. This barrier starts immediately before `Terminal.resize()`, never during the throttle wait, so it hides only xterm/WebGL's corrupt intermediate reflow frame without freezing the whole drag. Before a normal-buffer column change, if the user is above the live bottom, register a temporary marker at `viewportY`; after `Terminal.resize()` wait two animation frames for xterm's queued render and DOM viewport synchronization, then scroll to the marker's updated line and dispose it. A synchronous `scrollToLine()` is forbidden because the old DOM scroll height clamps the target before xterm's queued viewport sync. Cancel and dispose a pending marker on a newer resize or terminal detach. Do not force bottom-following or alternate-buffer terminals. Visibility restore fits immediately and forces a full refresh only when natural rendering does not complete within two frames or the renderer was rebuilt.
 - Split-pane leaf and divider bounds must align to the current display's physical pixel grid using the split root's global origin and `window.devicePixelRatio`. Arbitrary persisted/drag-preview ratios, fractional container bounds, nested splits, and fullscreen leaves must not place an xterm canvas at a fractional device-pixel origin. Snap divider start/end boundaries and derive the second pane from the remaining aligned space so the layout has no gap or overlap. Refresh the grid metrics on container resize and window changes, and use a resolution media query that rebinds itself whenever DPR changes so moving an unchanged-size window among 1080p, 2K fractional-scaling (including DPR 1.25/1.5), and Retina displays cannot retain the previous screen's pixel grid.
+
+**Remount snapshot ordering**:
+
+```tsx
+// Wrong: a StrictMode probe can serialize an empty terminal before restore finishes.
+snapshotBeforeUnmountRef.current = serializeCurrentBuffer;
+terminal.write(initialTerminalOutput, finishInitialDisplayRestore);
+
+// Correct: the valid source snapshot remains untouched until the new display is ready.
+terminal.write(initialTerminalOutput, () => {
+  scheduleFit(true);
+  requestAnimationFrame(() => {
+    snapshotBeforeUnmountRef.current = serializeCurrentBuffer;
+    markInitialDisplayReady();
+  });
+});
+```
 
 **Wrong**:
 
@@ -860,11 +878,11 @@ function buildSplitLayout(node: TerminalPaneNode, rect: Rect): { leaves: LeafLay
 - [ ] Divider drag resizing still works; nested splits resize correctly.
 - [ ] Pane tab switching and session activation unchanged.
 
-### Convention: Terminal resize drag uses local or DOM preview, then commits once
+### Convention: Terminal resize drag uses DOM preview, then commits once
 
-**What**: For terminal split dividers and terminal-side resizable panels, the drag interaction must update only a local preview during `mousemove` and commit the final width/ratio to React/Zustand state on `mouseup`. Do not write heavy global state or rerender embedded stats / git panels on every drag frame.
+**What**: For terminal split dividers and terminal-side resizable panels, the drag interaction must update wrapper geometry directly in the DOM during `mousemove` and commit the final width/ratio to React/Zustand state on `mouseup`. Do not write local/global React state or rerender embedded terminals, stats, or git panels on every drag frame.
 
-**Why**: Terminal panes contain xterm, realtime stats, and git views. Writing `paneTree` or panel width state every frame causes the whole terminal shell or panel subtree to rerender during drag, which makes width adjustment feel sticky and unsmooth.
+**Why**: Terminal panes contain xterm, realtime stats, and git views. Even component-local preview state still makes `SplitTerminalView` rebuild and reconcile every pane wrapper per frame. VS Code's SplitView/Sash path updates view geometry directly and commits proportions at drag end; matching that boundary keeps pointer tracking independent from React rendering.
 
 **Correct**:
 
@@ -888,18 +906,21 @@ const onUp = () => {
 
 ```tsx
 const onMove = (event: MouseEvent) => {
-  latestRatio = clampSplitRatio(rawRatio);
+  pendingRatioRef.current = clampSplitRatio(rawRatio);
   if (rafId === null) {
     rafId = requestAnimationFrame(() => {
       rafId = null;
-      setDragPreview({ splitId, ratio: latestRatio });
+      applySplitLayoutToElements(buildSplitLayout({
+        splitId,
+        ratio: pendingRatioRef.current,
+      }));
     });
   }
 };
 
 const onUp = () => {
-  setDragPreview(null);
-  setSplitRatio(splitId, latestRatio);
+  applyFinalPreview();
+  setSplitRatio(splitId, pendingRatioRef.current);
 };
 ```
 
@@ -919,7 +940,9 @@ const onMove = (event: MouseEvent) => {
 
 **Contracts**:
 
-- Drag preview may use local component state or direct DOM width updates, but the persistent width/ratio source of truth updates once on drag end.
+- Drag preview updates pane/divider wrapper geometry directly in the DOM at most once per animation frame; React state is limited to drag start/end presentation state.
+- Keep the latest live layout in a ref so an unrelated React render cannot restore stale persisted geometry during the drag.
+- The persistent width/ratio source of truth updates once on drag end, after synchronously applying the last pointer position.
 - For split panes, keep pane content component identity stable while only wrapper geometry changes.
 - For terminal-side panels, avoid rerendering `TerminalStatsPanel` / `GitChangesPanel` on every mousemove.
 
@@ -1209,6 +1232,8 @@ if (sequence === "\x1b[?25l") {
 
 **Fix**: In `XTermTerminal`, keep the helper textarea pinned to xterm's offscreen default while not composing, but keep it at least `1x1`; xterm's IME fallback for active-IME punctuation reads textarea diffs after keyCode 229, and some IMEs drop the first character when the helper textarea is `0x0`. During IME composition, anchor `.composition-view` and `.xterm-helper-textarea` to xterm's current `buffer.active.cursorX/cursorY` when that cursor is on an input prompt. If a TUI redraw moves the cursor to a status/progress row during composition, fall back to the nearest visible prompt row instead of blindly trusting that redraw cursor. Prompt recognition must include Codex's `›` prompt in addition to common shell prompts such as `>`, `$`, `#`, and `PS>`. Do not scan only the bottom rows or force a bottom-row fallback: real input can sit above the bottom while the IME candidate window still needs to follow the visible input row. Reapply the frozen composition anchor after xterm render events, because xterm's own `CompositionHelper.updateCompositionElements()` can rewrite `.composition-view` and helper textarea positions from the live buffer cursor. After `compositionend`, pin the helper textarea offscreen again.
 
+**Composition-end timing**: xterm intentionally reads the final helper-textarea value from its own `setTimeout(0)` after `compositionend`, because WebKit/Chromium can update the committed candidate after the event listeners return. The application IME listener must defer helper-textarea re-anchoring, scroll restoration, and `scheduleFit(true)` to a later timer registered after xterm's listener. Cancel that deferred cleanup if another composition starts or the controller is disposed. Mutating textarea geometry synchronously in `compositionend` can make WKWebView commit only the final raw pinyin character.
+
 **Correct**:
 
 ```tsx
@@ -1235,6 +1260,7 @@ textarea.style.display = "none";
 - [ ] If a TUI status/progress redraw owns the current cursor during composition, the candidate window falls back to the nearest visible prompt row.
 - [ ] Normal keyboard input, Enter, and paste still reach the PTY.
 - [ ] Chinese/IME composition still positions the candidate window correctly.
+- [ ] `node --test scripts/terminalImeComposition.test.mjs` confirms composition cleanup stays behind xterm's deferred commit and is cancelled for a new composition/disposal.
 
 ### Common Mistake: Estimating xterm IME cell size from container bounds
 

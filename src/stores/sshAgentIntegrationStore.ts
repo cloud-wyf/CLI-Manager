@@ -13,16 +13,30 @@ import type {
   SshToolSource,
 } from "../lib/types";
 
+export type SshAgentInstallJobStatus = "running" | "succeeded" | "failed";
+
+export interface SshAgentInstallJob {
+  hostId: string;
+  status: SshAgentInstallJobStatus;
+  phase: string;
+  progress: number;
+  error: string;
+  updatedAt: number;
+}
+
 interface SshAgentIntegrationStore {
   installations: SshAgentInstallation[];
   preferences: SshHostToolPreference[];
   integrations: SshAgentToolIntegration[];
+  agentInstallJobs: Record<string, SshAgentInstallJob>;
   loaded: boolean;
   loadError: string | null;
   fetchAll: () => Promise<void>;
   saveHostPreferences: (hostId: string, roots: Record<SshToolSource, string>) => Promise<void>;
   recordAgentProbe: (hostId: string, result: SshAgentProbeResult) => Promise<void>;
   recordAgentOperation: (hostId: string, result: SshAgentOperationResult) => Promise<void>;
+  updateAgentInstallJob: (hostId: string, job: Omit<SshAgentInstallJob, "hostId" | "updatedAt">) => void;
+  clearAgentInstallJob: (hostId: string) => void;
   recordHookReport: (
     hostId: string,
     sshUser: string,
@@ -45,6 +59,7 @@ export const useSshAgentIntegrationStore = create<SshAgentIntegrationStore>((set
   installations: [],
   preferences: [],
   integrations: [],
+  agentInstallJobs: {},
   loaded: false,
   loadError: null,
 
@@ -204,6 +219,33 @@ export const useSshAgentIntegrationStore = create<SshAgentIntegrationStore>((set
     await get().fetchAll();
   },
 
+  updateAgentInstallJob: (hostId, job) => {
+    const normalizedHostId = hostId.trim();
+    if (!normalizedHostId) return;
+    set((state) => ({
+      agentInstallJobs: {
+        ...state.agentInstallJobs,
+        [normalizedHostId]: {
+          hostId: normalizedHostId,
+          ...job,
+          progress: Math.max(0, Math.min(100, Math.round(job.progress))),
+          updatedAt: Date.now(),
+        },
+      },
+    }));
+  },
+
+  clearAgentInstallJob: (hostId) => {
+    const normalizedHostId = hostId.trim();
+    if (!normalizedHostId) return;
+    set((state) => {
+      if (!state.agentInstallJobs[normalizedHostId]) return state;
+      const agentInstallJobs = { ...state.agentInstallJobs };
+      delete agentInstallJobs[normalizedHostId];
+      return { agentInstallJobs };
+    });
+  },
+
   recordHookReport: async (hostId, sshUser, configuredRoot, report, integrationId, scopeKind = "hostPrimary") => {
     if (fetchAllPromise) await fetchAllPromise;
     const normalizedHostId = hostId.trim();
@@ -238,60 +280,20 @@ export const useSshAgentIntegrationStore = create<SshAgentIntegrationStore>((set
     if (!result.sourceInstanceId || !result.remoteMachineId || !result.sshUser || !result.configRootHash) {
       throw new Error("history_remote_identity_invalid");
     }
-    const normalizedRoot = configuredRoot.trim();
-    const db = await getDb();
-    const existing = await db.select<Array<{ integration_id: string }>>(
-      `SELECT integration_id FROM ssh_agent_tool_integrations
-       WHERE host_id = $1 AND source = $2 AND configured_root = $3
-         AND scope_kind IN ('hostPrimary', 'projectOverride')
-       ORDER BY CASE WHEN scope_kind = $4 THEN 0 ELSE 1 END
-       LIMIT 1`,
-      [normalizedHostId, result.source, normalizedRoot, scopeKind],
-    );
-    const checkedAt = Date.now().toString();
-    if (existing[0]) {
-      await db.execute(
-        `UPDATE ssh_agent_tool_integrations SET
-           installation_id = $1, remote_machine_id = $2, ssh_user = $3,
-           canonical_root = $4, config_root_hash = $5,
-           history_source_instance_id = $6, validation_state = 'valid',
-           cleanup_state = 'active', checked_at = $7
-         WHERE integration_id = $8`,
-        [
-          result.installationId,
-          result.remoteMachineId,
-          result.sshUser,
-          result.canonicalConfigRoot,
-          result.configRootHash,
-          result.sourceInstanceId,
-          checkedAt,
-          existing[0].integration_id,
-        ],
-      );
-    } else {
-      await db.execute(
-        `INSERT INTO ssh_agent_tool_integrations (
-           integration_id, host_id, installation_id, remote_machine_id, ssh_user,
-           source, scope_kind, configured_root, canonical_root, config_root_hash,
-           hook_record_json, history_source_instance_id, validation_state,
-           cleanup_state, checked_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '{}', $11, 'valid', 'active', $12)`,
-        [
-          crypto.randomUUID(),
-          normalizedHostId,
-          result.installationId,
-          result.remoteMachineId,
-          result.sshUser,
-          result.source,
-          scopeKind,
-          normalizedRoot,
-          result.canonicalConfigRoot,
-          result.configRootHash,
-          result.sourceInstanceId,
-          checkedAt,
-        ],
-      );
-    }
+    await invoke("ssh_db_record_history_source", {
+      input: {
+        hostId: normalizedHostId,
+        configuredRoot: configuredRoot.trim(),
+        source: result.source,
+        scopeKind,
+        sourceInstanceId: result.sourceInstanceId,
+        installationId: result.installationId,
+        remoteMachineId: result.remoteMachineId,
+        sshUser: result.sshUser,
+        canonicalConfigRoot: result.canonicalConfigRoot,
+        configRootHash: result.configRootHash,
+      },
+    });
     await get().fetchAll();
   },
 }));

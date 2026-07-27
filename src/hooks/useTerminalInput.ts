@@ -6,6 +6,10 @@ import {
 } from "react";
 import type { IBufferLine, Terminal } from "@xterm/xterm";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  readImage as readClipboardImage,
+  readText as readClipboardText,
+} from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
@@ -13,6 +17,7 @@ import { TERMINAL_FILE_PATH_MIME } from "../lib/aiPathFormatter";
 import {
   arrayBufferToBase64,
   createClipboardImageFileName,
+  createClipboardPngFile,
   getClipboardImageFile,
   hasDataTransferType,
 } from "../lib/terminalClipboardImage";
@@ -150,10 +155,11 @@ export interface UseTerminalInputResult {
   cancelAiSuggestionRefresh: () => void;
   scheduleSuggestionRefresh: () => void;
   updateSuggestionGhostPosition: () => void;
-  acceptSuggestion: () => boolean;
+  acceptSuggestion: (visibleSuffix?: string) => boolean;
   onCommandSubmitted: (command: string) => void;
   attachPasteAndDrop: (terminal: Terminal) => () => void;
   pasteText: (terminal: Terminal, text: string) => void;
+  readClipboardPasteText: () => Promise<string>;
   attachSelection: (
     terminal: Terminal,
     options: TerminalInputSelectionOptions,
@@ -194,7 +200,7 @@ export function useTerminalInput({
   const cancelAiSuggestionRefreshRef = useRef<() => void>(() => {});
   const scheduleSuggestionRefreshRef = useRef<() => void>(() => {});
   const updateSuggestionGhostPositionRef = useRef<() => void>(() => {});
-  const acceptSuggestionRef = useRef<() => boolean>(() => false);
+  const acceptSuggestionRef = useRef<(visibleSuffix?: string) => boolean>(() => false);
   const getInput = () => inputBufferRef.current;
 
   const resetSuggestionState = () => {
@@ -1060,12 +1066,13 @@ export function useTerminalInput({
       }, SUGGESTION_LOCAL_DEBOUNCE_MS);
     };
 
-    const acceptSuggestion = () => {
+    const acceptSuggestion = (visibleSuffix?: string) => {
       const suggestion = suggestionRef.current;
       const settings = useSettingsStore.getState();
-      if (!settings.terminalInputSuggestionsEnabled || !suggestion?.suffix) return false;
+      const suffix = suggestion?.suffix ?? visibleSuffix;
+      if (!settings.terminalInputSuggestionsEnabled || !suffix) return false;
       clearSuggestion();
-      forwardSuggestionInput(suggestion.suffix);
+      forwardSuggestionInput(suffix);
       settings.recordTerminalInputSuggestionUsage({ accepted: true });
       return true;
     };
@@ -1093,6 +1100,39 @@ export function useTerminalInput({
     };
   };
 
+  const getCurrentPasteContext = () => {
+    const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
+    const project = session?.projectId
+      ? useProjectStore.getState().projects.find((item) => item.id === session.projectId)
+      : null;
+    return { session, project };
+  };
+
+  const savePastedImageForTerminal = async (
+    file: File,
+    context: ReturnType<typeof getCurrentPasteContext>,
+  ): Promise<string | null> => {
+    const { session, project } = context;
+    const attachRootPath = project?.path || session?.cwd || null;
+    if (!attachRootPath) return null;
+
+    try {
+      const fileName = createClipboardImageFileName(file);
+      const dataBase64 = arrayBufferToBase64(await file.arrayBuffer());
+      const attachedRelativePath = await invoke<string>("file_attach_data", {
+        rootPath: attachRootPath,
+        fileName,
+        dataBase64,
+      });
+      cleanupExpiredAttachmentsOnce(attachRootPath);
+      return joinLocalPath(attachRootPath, attachedRelativePath);
+    } catch (err) {
+      logError("Failed to attach pasted terminal image", { sessionId, err });
+      toast.error("截图粘贴失败", { description: String(err) });
+      return null;
+    }
+  };
+
   const attachPasteAndDrop = (terminal: Terminal) => {
     const pasteTarget = containerRef.current;
     if (!pasteTarget) return () => {};
@@ -1112,49 +1152,9 @@ export function useTerminalInput({
       paste: pasteIntoTerminal,
       focus: () => terminal.focus(),
     });
-    const getShellForPathQuoting = async () => {
-      const os = await getOsPlatformForPathQuoting();
-      const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
-      const sessionShell = normalizeShellForKnownOs(session?.shell, os);
-      if (sessionShell) return sessionShell;
-      const defaultShell = normalizeShellForKnownOs(useSettingsStore.getState().defaultShell, os);
-      return defaultShell ?? defaultShellForOs(os);
-    };
-    const getCurrentDropContext = () => {
-      const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
-      const project = session?.projectId
-        ? useProjectStore.getState().projects.find((item) => item.id === session.projectId)
-        : null;
-      return { session, project };
-    };
-    const savePastedImageForTerminal = async (
-      file: File,
-      context: ReturnType<typeof getCurrentDropContext>,
-    ): Promise<string | null> => {
-      const { session, project } = context;
-      const attachRootPath = project?.path || session?.cwd || null;
-      if (!attachRootPath) return null;
-
-      try {
-        const fileName = createClipboardImageFileName(file);
-        const dataBase64 = arrayBufferToBase64(await file.arrayBuffer());
-        const attachedRelativePath = await invoke<string>("file_attach_data", {
-          rootPath: attachRootPath,
-          fileName,
-          dataBase64,
-        });
-        cleanupExpiredAttachmentsOnce(attachRootPath);
-        return joinLocalPath(attachRootPath, attachedRelativePath);
-      } catch (err) {
-        logError("Failed to attach pasted terminal image", { sessionId, err });
-        toast.error("截图粘贴失败", { description: String(err) });
-        return null;
-      }
-    };
-
     const onPaste = (event: ClipboardEvent) => {
       const imageFile = getClipboardImageFile(event.clipboardData);
-      const context = getCurrentDropContext();
+      const context = getCurrentPasteContext();
       if (imageFile) {
         event.preventDefault();
         event.stopPropagation();
@@ -1166,7 +1166,33 @@ export function useTerminalInput({
         return;
       }
 
-      const text = event.clipboardData?.getData("text/plain");
+      const clipboardData = event.clipboardData;
+      const text = clipboardData?.getData("text/plain");
+
+      // 资源管理器复制文件放入的是 CF_HDROP，WebView 拿不到路径文本。检测到文件提示时
+      // 走原生命令读绝对路径，成功则优先粘路径（读不到再回退文本）。
+      const hasFileHint = (clipboardData?.files?.length ?? 0) > 0
+        || hasDataTransferType(clipboardData ?? null, "Files");
+      if (hasFileHint) {
+        event.preventDefault();
+        event.stopPropagation();
+        void invoke<string[]>("clipboard_read_file_paths")
+          .then(async (paths) => {
+            const filePaths = paths.filter(Boolean);
+            if (filePaths.length > 0) {
+              pasteIntoTerminal(formatShellPathList(filePaths, await getShellForPathQuoting()));
+              terminal.focus();
+              return;
+            }
+            if (text) pasteIntoTerminal(text);
+          })
+          .catch((err) => {
+            logError("Failed to read clipboard file paths", { sessionId, err });
+            if (text) pasteIntoTerminal(text);
+          });
+        return;
+      }
+
       if (text === undefined) return;
       event.preventDefault();
       event.stopPropagation();
@@ -1239,6 +1265,61 @@ export function useTerminalInput({
     terminal.paste(normalizedText);
   };
 
+  const getShellForPathQuoting = async () => {
+    const os = await getOsPlatformForPathQuoting();
+    const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
+    const sessionShell = normalizeShellForKnownOs(session?.shell, os);
+    if (sessionShell) return sessionShell;
+    const defaultShell = normalizeShellForKnownOs(useSettingsStore.getState().defaultShell, os);
+    return defaultShell ?? defaultShellForOs(os);
+  };
+
+  const readClipboardImageFile = async (): Promise<File | null> => {
+    let image: Awaited<ReturnType<typeof readClipboardImage>>;
+    try {
+      image = await readClipboardImage();
+    } catch {
+      return null;
+    }
+
+    try {
+      const { width, height } = await image.size();
+      return await createClipboardPngFile(await image.rgba(), width, height);
+    } catch (err) {
+      logError("Failed to convert clipboard image", { sessionId, err });
+      toast.error("截图粘贴失败", { description: String(err) });
+      return null;
+    } finally {
+      await image.close().catch(() => {});
+    }
+  };
+
+  // Ctrl+V / 右键粘贴统一按“文件路径 → 截图位图 → 文本”读取。资源管理器文件使用
+  // 原生 CF_HDROP；截图通过 clipboard-manager 读取 RGBA 后转成 PNG，并复用现有附件保存链路。
+  const readClipboardPasteText = async (): Promise<string> => {
+    let filePaths: string[] = [];
+    try {
+      filePaths = (await invoke<string[]>("clipboard_read_file_paths")).filter(Boolean);
+    } catch (err) {
+      logError("Failed to read clipboard file paths", { sessionId, err });
+    }
+    if (filePaths.length > 0) {
+      return formatShellPathList(filePaths, await getShellForPathQuoting());
+    }
+
+    const imageFile = await readClipboardImageFile();
+    if (imageFile) {
+      const path = await savePastedImageForTerminal(imageFile, getCurrentPasteContext());
+      return path ? formatShellPathList([path], await getShellForPathQuoting()) : "";
+    }
+
+    try {
+      return await readClipboardText();
+    } catch {
+      return "";
+    }
+  };
+
   return {
     isComposingRef,
     attachInputForwarding,
@@ -1247,13 +1328,14 @@ export function useTerminalInput({
     cancelAiSuggestionRefresh: () => cancelAiSuggestionRefreshRef.current(),
     scheduleSuggestionRefresh: () => scheduleSuggestionRefreshRef.current(),
     updateSuggestionGhostPosition: () => updateSuggestionGhostPositionRef.current(),
-    acceptSuggestion: () => acceptSuggestionRef.current(),
+    acceptSuggestion: (visibleSuffix) => acceptSuggestionRef.current(visibleSuffix),
     onCommandSubmitted: (command) => {
       lastSubmittedCommandRef.current = command;
       suggestionContextCacheRef.current = null;
     },
     attachPasteAndDrop,
     pasteText,
+    readClipboardPasteText,
     attachSelection,
   };
 }

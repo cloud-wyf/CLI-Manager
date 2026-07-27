@@ -1,6 +1,7 @@
 ﻿import type { ReactNode } from "react";
 import type { AppLanguage } from "../../lib/i18n";
 import type { HistorySessionView } from "../../lib/types";
+import { inferSubagentParentSessionId } from "../../lib/historySubagents";
 
 export type TimeGroupLabel = "Today" | "Yesterday" | "This Week" | "This Month" | "Earlier";
 
@@ -81,19 +82,6 @@ export function makeSessionLabel(session: HistorySessionView): string {
 
 function sessionRelationKey(source: string, projectKey: string, sessionId: string): string {
   return `${source}:${projectKey}:${sessionId}`;
-}
-
-export function inferSubagentParentSessionId(session: HistorySessionView): string | null {
-  const parts = (session.file_path ?? "").replace(/\\/g, "/").split("/").filter(Boolean);
-  const subagentsIndex = parts.findIndex((part) => part.toLowerCase() === "subagents");
-  if (subagentsIndex <= 0) return null;
-
-  const fileName = parts[subagentsIndex + 1] ?? "";
-  if (!/^agent-[^/]+\.jsonl$/i.test(fileName)) return null;
-
-  const parentSessionId = parts[subagentsIndex - 1] ?? "";
-  if (!parentSessionId || parentSessionId === session.session_id) return null;
-  return parentSessionId;
 }
 
 export function buildHistorySessionChildMap(items: HistorySessionView[]): Map<string, HistorySessionView[]> {

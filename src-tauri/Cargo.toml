@@ -21,7 +21,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "protocol-asset", "devtools"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "devtools", "macos-private-api"] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
@@ -71,6 +71,8 @@ tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 cli-manager-web-protocol = { path = "../crates/web-protocol" }
 
 # macOS universal 交叉编译时不能复用宿主架构的 OpenSSL，因此仅在 macOS 使用 vendored 构建。
+# 注意：macos-private-api 必须在上方 [dependencies].tauri 中声明（不能仅放在 macOS target 下），
+# 因为 tauri.conf.json 的 macOSPrivateApi 会在所有平台的 build script 中校验 feature allowlist。
 [target.'cfg(target_os = "macos")'.dependencies]
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
@@ -87,7 +89,7 @@ keyring-core = "1"
 zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Performance", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_System_Environment", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Performance", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_System_Environment", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Threading", "Win32_Security"] }
 windows-native-keyring-store = "1"
 
 [target.'cfg(unix)'.dependencies]

@@ -17,6 +17,7 @@ import { isSameProjectFileContext } from "../lib/terminalProject";
 import { projectSupportsCapability } from "../lib/projectCapabilities";
 import {
   buildSshRemoteFileContext,
+  releaseSshRemoteFileContext,
   remoteEntryToSearchMatch,
   sshRemoteListDir,
   sshRemoteReadFile,
@@ -313,9 +314,11 @@ const DEFAULT_COLLAPSED_DIRECTORY_NAME_SET = new Set(
 const SEARCH_DEBOUNCE_MS = 220;
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let searchRequestSeq = 0;
+let openProjectRequestSeq = 0;
 const inFlightGitChangeRequests = new Map<string, Promise<GitFileChange[]>>();
 let refreshVisibleStateInFlight: Promise<void> | null = null;
 let pendingRefreshChangedPaths: Set<string> | null | undefined;
+const remoteFileContextReleases = new Map<string, Promise<void>>();
 
 export function isDefaultCollapsedDirectoryName(name: string): boolean {
   return DEFAULT_COLLAPSED_DIRECTORY_NAME_SET.has(name.toLowerCase());
@@ -356,6 +359,23 @@ function replaceChildren(
     if (entry.children) return { ...entry, children: replaceChildren(entry.children, targetPath, children) };
     return entry;
   });
+}
+
+function getLoadedDirectoryChildren(
+  entries: ProjectFileEntry[],
+  targetPath: string
+): ProjectFileEntry[] | undefined {
+  if (targetPath === "") return entries;
+  for (const entry of entries) {
+    if (entry.path === targetPath) {
+      return entry.kind === "directory" ? entry.children : undefined;
+    }
+    if (entry.children && targetPath.startsWith(`${entry.path}/`)) {
+      const children = getLoadedDirectoryChildren(entry.children, targetPath);
+      if (children !== undefined) return children;
+    }
+  }
+  return undefined;
 }
 
 function mergeLoadedSubtrees(
@@ -572,17 +592,27 @@ function shouldRefreshOpenFile(filePath: string, changedPaths?: string[]): boole
   return !changedPaths?.length || changedPaths.some((path) => changedPathAffectsFile(path, filePath));
 }
 
+function addDirectoryPathWithAncestors(paths: Set<string>, path: string): void {
+  paths.add("");
+  if (!path) return;
+  let current = "";
+  for (const segment of path.split("/")) {
+    if (!segment) continue;
+    current = current ? `${current}/${segment}` : segment;
+    paths.add(current);
+  }
+}
+
 function collectRefreshPaths(
   expandedPaths: Set<string>,
   openFiles: ActiveProjectFile[],
   changedPaths?: string[]
 ): string[] {
   if (!changedPaths?.length) {
-    return Array.from(new Set([
-      "",
-      ...expandedPaths,
-      ...openFiles.map((file) => parentPath(file.path)),
-    ])).sort((a, b) => pathDepth(a) - pathDepth(b));
+    const paths = new Set<string>();
+    for (const path of expandedPaths) addDirectoryPathWithAncestors(paths, path);
+    for (const file of openFiles) addDirectoryPathWithAncestors(paths, parentPath(file.path));
+    return Array.from(paths).sort((a, b) => pathDepth(a) - pathDepth(b));
   }
 
   const paths = new Set<string>();
@@ -592,10 +622,12 @@ function collectRefreshPaths(
       continue;
     }
     if (path === ".git" || path.startsWith(".git/")) continue;
-    paths.add(parentPath(path));
+    addDirectoryPathWithAncestors(paths, parentPath(path));
   }
   for (const file of openFiles) {
-    if (shouldRefreshOpenFile(file.path, changedPaths)) paths.add(parentPath(file.path));
+    if (shouldRefreshOpenFile(file.path, changedPaths)) {
+      addDirectoryPathWithAncestors(paths, parentPath(file.path));
+    }
   }
   return Array.from(paths).sort((a, b) => pathDepth(a) - pathDepth(b));
 }
@@ -608,6 +640,31 @@ function mergePendingRefreshPaths(changedPaths?: string[]): void {
   if (pendingRefreshChangedPaths === null) return;
   pendingRefreshChangedPaths ??= new Set<string>();
   for (const path of changedPaths) pendingRefreshChangedPaths.add(path);
+}
+
+function remoteFileContextReleaseKey(context: SshRemoteFileContext): string {
+  return `${context.launch.hostId}\0${context.consumerId}`;
+}
+
+function releaseRemoteFileContext(context: SshRemoteFileContext | null): Promise<void> {
+  if (!context) return Promise.resolve();
+  const key = remoteFileContextReleaseKey(context);
+  const previousRelease = remoteFileContextReleases.get(key) ?? Promise.resolve();
+  const release = previousRelease
+    .catch(() => undefined)
+    .then(() => releaseSshRemoteFileContext(context))
+    .catch(() => undefined)
+    .finally(() => {
+      if (remoteFileContextReleases.get(key) === release) {
+        remoteFileContextReleases.delete(key);
+      }
+    });
+  remoteFileContextReleases.set(key, release);
+  return release;
+}
+
+async function waitForRemoteFileContextRelease(context: SshRemoteFileContext): Promise<void> {
+  await remoteFileContextReleases.get(remoteFileContextReleaseKey(context));
 }
 
 export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
@@ -636,11 +693,14 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     if (!projectSupportsCapability(project, "files")) {
       throw new Error("remote_project_capability_unsupported:files");
     }
+    const requestSeq = ++openProjectRequestSeq;
     const current = get().project;
     const keepCurrentProject = isSameProjectFileContext(current, project);
+    const previousRemoteFileContext = get().remoteFileContext;
     set({
       project,
       remoteFileContext: null,
+      tree: keepCurrentProject ? get().tree : [],
       loading: true,
       searchMode: "files",
       searchQuery: "",
@@ -659,15 +719,31 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
       gitChanges: keepCurrentProject ? get().gitChanges : [],
       clipboard: keepCurrentProject ? get().clipboard : null,
     });
+    void releaseRemoteFileContext(previousRemoteFileContext);
+    let remoteContext: SshRemoteFileContext | null = null;
     try {
-      const remoteContext = project.environment_type === "ssh" ? await buildSshRemoteFileContext(project) : null;
+      remoteContext = project.environment_type === "ssh" ? await buildSshRemoteFileContext(project) : null;
+      if (remoteContext) await waitForRemoteFileContextRelease(remoteContext);
+      if (requestSeq !== openProjectRequestSeq || !isSameProjectFileContext(get().project, project)) return;
+      set({ remoteFileContext: remoteContext });
       const [tree, gitChanges] = await Promise.all([
         remoteContext ? sshRemoteListDir(remoteContext) : listDir(project.path, ""),
         remoteContext ? Promise.resolve([]) : fetchGitChanges(project.path),
       ]);
-      if (get().project?.id !== project.id) return;
-      set({ tree, gitChanges, remoteFileContext: remoteContext, loading: false });
+      if (
+        requestSeq !== openProjectRequestSeq
+        || !isSameProjectFileContext(get().project, project)
+        || get().remoteFileContext !== remoteContext
+      ) {
+        return;
+      }
+      set({ tree, gitChanges, loading: false });
     } catch (err) {
+      if (requestSeq !== openProjectRequestSeq || !isSameProjectFileContext(get().project, project)) return;
+      if (get().remoteFileContext === remoteContext) {
+        set({ remoteFileContext: null });
+        void releaseRemoteFileContext(remoteContext);
+      }
       logError("Failed to open project files", err);
       toast.error("文件列表加载失败", { description: String(err) });
       set({ tree: [], gitChanges: [], loading: false });
@@ -675,6 +751,8 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
   },
 
   closeProject: () => {
+    openProjectRequestSeq += 1;
+    const remoteFileContext = get().remoteFileContext;
     set({
       project: null,
       remoteFileContext: null,
@@ -696,6 +774,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
       gitChanges: [],
       clipboard: null,
     });
+    void releaseRemoteFileContext(remoteFileContext);
   },
 
   refresh: async () => {
@@ -732,11 +811,17 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
   },
 
   refreshVisibleStateOnce: async (changedPaths) => {
-    const project = get().project;
+    const state = get();
+    const project = state.project;
     if (!project) return;
 
-    const expandedPaths = get().expandedPaths;
-    const openFiles = get().openFiles;
+    const remoteFileContext = state.remoteFileContext;
+    // SSH 项目的本地 path 为空。远程上下文尚未建立或已经失败时，绝不能
+    // 回落到本地 file_* command，否则会把空根路径送进 canonical_root。
+    if (project.environment_type === "ssh" && !remoteFileContext) return;
+
+    const expandedPaths = state.expandedPaths;
+    const openFiles = state.openFiles;
     const refreshPaths = collectRefreshPaths(expandedPaths, openFiles, changedPaths);
 
     try {
@@ -744,8 +829,8 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
         try {
           return {
             path,
-            children: get().remoteFileContext
-              ? await sshRemoteListDir(get().remoteFileContext!, path)
+            children: remoteFileContext
+              ? await sshRemoteListDir(remoteFileContext, path)
               : await listDir(project.path, path),
           };
         } catch (err) {
@@ -798,8 +883,16 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
           continue;
         }
 
-        const { file: refreshedFile } = await loadProjectFile(project, latestEntry);
+        const { file: refreshedFile } = await loadProjectFile(project, latestEntry, remoteFileContext);
         nextOpenFiles.push(refreshedFile);
+      }
+
+      const currentState = get();
+      if (
+        !isSameProjectFileContext(currentState.project, project)
+        || currentState.remoteFileContext?.consumerId !== remoteFileContext?.consumerId
+      ) {
+        return;
       }
 
       const activeFile = nextOpenFiles.find((file) => file.path === get().activeFilePath) ?? nextOpenFiles[0] ?? null;
@@ -859,6 +952,10 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     }
     expanded.add(path);
     set({ expandedPaths: expanded });
+    const remoteFileContext = get().remoteFileContext;
+    if (remoteFileContext && getLoadedDirectoryChildren(get().tree, path) !== undefined) {
+      return;
+    }
     await get().loadDir(path);
   },
 
@@ -866,14 +963,21 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     const project = get().project;
     if (!project) return;
 
+    const remoteFileContext = get().remoteFileContext;
+    const currentTree = get().tree;
     const loadedDirs: Array<{ path: string; children: ProjectFileEntry[] }> = [];
+    const expandedDirectoryPaths: string[] = [];
     let currentPath = path;
 
     while (true) {
-      const children = get().remoteFileContext
-        ? await sshRemoteListDir(get().remoteFileContext!, currentPath)
-        : await listDir(project.path, currentPath);
-      loadedDirs.push({ path: currentPath, children });
+      const cachedChildren = remoteFileContext
+        ? getLoadedDirectoryChildren(currentTree, currentPath)
+        : undefined;
+      const children = cachedChildren ?? (remoteFileContext
+        ? await sshRemoteListDir(remoteFileContext, currentPath)
+        : await listDir(project.path, currentPath));
+      if (cachedChildren === undefined) loadedDirs.push({ path: currentPath, children });
+      expandedDirectoryPaths.push(currentPath);
 
       if (
         children.length !== 1
@@ -887,7 +991,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     }
 
     set((state) => ({
-      expandedPaths: new Set([...state.expandedPaths, ...loadedDirs.map((dir) => dir.path)]),
+      expandedPaths: new Set([...state.expandedPaths, ...expandedDirectoryPaths]),
       tree: loadedDirs.reduce(
         (tree, dir) => replaceChildrenKeepingLoadedSubtrees(tree, dir.path, dir.children),
         state.tree
@@ -1043,13 +1147,29 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     }
 
     const loadedDirs: Array<{ path: string; children: ProjectFileEntry[] }> = [];
+    const directoryPathsToExpand = new Set<string>();
+    const remoteFileContext = get().remoteFileContext;
+    const currentTree = get().tree;
+    const fetchedChildren = new Map<string, ProjectFileEntry[]>();
+    const resolveChildren = async (directoryPath: string): Promise<ProjectFileEntry[]> => {
+      const fetched = fetchedChildren.get(directoryPath);
+      if (fetched) return fetched;
+      const cached = remoteFileContext
+        ? getLoadedDirectoryChildren(currentTree, directoryPath)
+        : undefined;
+      if (cached !== undefined) return cached;
+      const children = remoteFileContext
+        ? await sshRemoteListDir(remoteFileContext, directoryPath)
+        : await listDir(project.path, directoryPath);
+      fetchedChildren.set(directoryPath, children);
+      loadedDirs.push({ path: directoryPath, children });
+      return children;
+    };
     let parentPath = "";
     let target: ProjectFileEntry | null = null;
     for (const segment of normalizedPath.split("/")) {
-      const children = get().remoteFileContext
-        ? await sshRemoteListDir(get().remoteFileContext!, parentPath)
-        : await listDir(project.path, parentPath);
-      loadedDirs.push({ path: parentPath, children });
+      directoryPathsToExpand.add(parentPath);
+      const children = await resolveChildren(parentPath);
       const currentPath = parentPath ? `${parentPath}/${segment}` : segment;
       target = children.find((entry) => entry.path === currentPath) ?? null;
       if (!target) return false;
@@ -1058,10 +1178,8 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     if (!target) return false;
 
     if (target.kind === "directory") {
-      const children = get().remoteFileContext
-        ? await sshRemoteListDir(get().remoteFileContext!, target.path)
-        : await listDir(project.path, target.path);
-      loadedDirs.push({ path: target.path, children });
+      directoryPathsToExpand.add(target.path);
+      await resolveChildren(target.path);
     }
 
     set((state) => ({
@@ -1071,7 +1189,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
       ),
       expandedPaths: new Set([
         ...state.expandedPaths,
-        ...loadedDirs.map((dir) => dir.path),
+        ...directoryPathsToExpand,
       ]),
       selectedTreePath: target.path,
       searchQuery: "",

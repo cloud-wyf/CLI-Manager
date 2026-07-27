@@ -1384,3 +1384,334 @@ Completed S06-S10 with remote history/cache and resume, read-only file and Git p
 ### Next Steps
 
 - None - task complete
+
+
+## Session 40: 修复 PR #165 跨平台 Tauri Feature 配置
+
+**Date**: 2026-07-22
+**Task**: 修复 PR #165 跨平台 Tauri Feature 配置
+**Branch**: `pr-165-targeted-tauri-feature`
+
+### Summary
+
+将 macos-private-api 限定到 macOS Cargo target，恢复 Windows proxy E2E 与直接 Cargo 检查；同步发布契约、CHANGELOG 和验证记录。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0c723c3c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 41: 修复 Worktree 创建并发与错误诊断
+
+**Date**: 2026-07-23
+**Task**: 修复 Worktree 创建并发与错误诊断
+**Branch**: `master`
+
+### Summary
+
+修复同名 Worktree 创建并发撞路径、Git checkout 错误截断和未处理 Promise；补齐中英文提示、Worktree 合约及 V1.3.1 变更记录。用户已确认修复成功。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a140aaef` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 42: 修复 WebDAV 远程项目恢复字段
+
+**Date**: 2026-07-23
+**Task**: 修复 WebDAV 远程项目恢复字段
+**Branch**: `master`
+
+### Summary
+
+WebDAV 工作区快照现同步可移植 SSH 主机分组、主机档案及项目绑定；恢复保持远程路径和主机绑定，严格排除凭据与本机路径，并补齐事务回归测试和同步契约。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4be60cce` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 43: 完成 SSH 远程 Git 全功能面板
+
+**Date**: 2026-07-23
+**Task**: 完成 SSH 远程 Git 全功能面板
+**Branch**: `feat/ssh-agent`
+
+### Summary
+
+统一 SSH 与本地 Git 面板，发布 Agent 0.1.3，并修复根仓库路径及未跟踪目录采集问题。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c6c7626e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 44: Grok Hook 与实时统计修复
+
+**Date**: 2026-07-24
+**Task**: Grok Hook 与实时统计修复
+**Branch**: `master`
+
+### Summary
+
+完成 Grok Hook 安装、审批通知映射、历史恢复与当前会话实时统计修复；用户验收通过，关联 #152 与 #140，并 rebase 到最新 origin/master。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ec4352ee` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 45: 修复 SSH 远程会话历史打开与稳定性问题
+
+**Date**: 2026-07-24
+**Task**: 修复 SSH 远程会话历史打开与稳定性问题
+**Branch**: `master`
+
+### Summary
+
+修复 Agent 安装身份轮换导致的远程历史身份冲突、详情请求 null 协议不兼容，并提交 V1.3.1 远程历史索引、持久化与前端稳定性改进。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `45f9d0ac` | (see git log) |
+| `1cd8b359` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 46: Codex/Claude 提问通知 Hook
+
+**Date**: 2026-07-27
+**Task**: Codex/Claude 提问通知 Hook
+**Branch**: `master`
+
+### Summary
+
+为 Codex request_user_input 与 Claude AskUserQuestion 增加专用通知 Hook，补齐本地、WSL、cc-switch、SSH Agent、信任状态和双语通知；修复 Codex TOML 等价信任键重复导致的状态刷新失败。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dbba47ae` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 47: 设置页侧边导航小屏滚动
+
+**Date**: 2026-07-27
+**Task**: 设置页侧边导航小屏滚动
+**Branch**: `master`
+
+### Summary
+
+修复设置页侧边菜单在小高度窗口中无法滚动的问题，为导航列表增加自适应纵向滚动，并同步 V1.3.2 更新日志与功能清单；TypeScript 和 diff 检查通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4dfd429b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 48: 修复历史转换与继续对话
+
+**Date**: 2026-07-27
+**Task**: 修复历史转换与继续对话
+**Branch**: `master`
+
+### Summary
+
+放开非破坏性 Claude/Codex 历史转换的运行态误阻断，保证共享 JSONL 单次追加，并让跨 CLI 转换后的会话在 cwd 唯一命中时直接裸恢复。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5a4232e9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 49: 修复历史会话转换、删除与列表刷新
+
+**Date**: 2026-07-27
+**Task**: 修复历史会话转换、删除与列表刷新
+**Branch**: `master`
+
+### Summary
+
+修复 Claude/Codex 转换后的详情身份与恢复 CLI 串线；显式删除不再被同来源进程误拦截，备份恢复仍保持排他；历史索引自动/手动刷新保留已加载范围和滚动位置，并补齐契约与回归测试。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3556a869` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

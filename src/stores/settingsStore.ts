@@ -66,8 +66,10 @@ export type TerminalThemeMode = "system" | "independent";
 export type SidebarDensity = "compact" | "comfortable";
 export type ViewMode = "standard" | "compact";
 export type CloseBehavior = "ask" | "minimize" | "exit";
-/** 退出时存在运行中任务的处理方式：询问 / 后台继续 / 丢弃任务并退出。 */
+/** 退出时存在运行中任务的处理方式：询问 / 后台继续 / 最小化到托盘 / 丢弃任务并退出。 */
 export type ExitWithRunningTasksBehavior = "ask" | "background" | "minimize" | "discard";
+/** 启动检测到可恢复终端标签时的恢复方式：启动时弹窗询问 / 静默自动恢复。 */
+export type TerminalSessionRestoreMode = "ask" | "auto";
 export const LINUX_GRAPHICS_MODES = ["auto", "system", "disable-dmabuf", "disable-compositing"] as const;
 export type LinuxGraphicsMode = (typeof LINUX_GRAPHICS_MODES)[number];
 type LastSettingsTab =
@@ -110,7 +112,7 @@ export type TerminalPanelWidthKey = "merged" | "stats" | "git" | "replay" | "fil
 export type TerminalPanelWidthSettings = Record<TerminalPanelWidthKey, number>;
 export type TerminalSettingsSectionKey = "behavior" | "shells" | "themes" | "background";
 export type TerminalSettingsSectionsExpanded = Record<TerminalSettingsSectionKey, boolean>;
-export type HookSettingsSectionKey = "toast" | "notifications" | "claude" | "codex" | "pi";
+export type HookSettingsSectionKey = "toast" | "notifications" | "claude" | "codex" | "pi" | "grok";
 export type HookSettingsSectionsExpanded = Record<HookSettingsSectionKey, boolean>;
 export const UI_FONT_SIZE_MIN = 11;
 export const UI_FONT_SIZE_MAX = 18;
@@ -148,6 +150,7 @@ export const HOOK_SETTINGS_SECTION_KEYS: readonly HookSettingsSectionKey[] = [
   "claude",
   "codex",
   "pi",
+  "grok",
 ];
 export const HOOK_SETTINGS_SECTIONS_EXPANDED_DEFAULT: HookSettingsSectionsExpanded = {
   toast: false,
@@ -155,6 +158,7 @@ export const HOOK_SETTINGS_SECTIONS_EXPANDED_DEFAULT: HookSettingsSectionsExpand
   claude: false,
   codex: false,
   pi: false,
+  grok: false,
 };
 export type ShortcutAction =
   | "newTerminal"
@@ -186,7 +190,10 @@ export interface DesktopPetSettings {
   enabled: boolean;
   petId: string;
   alwaysOnTop: boolean;
+  agentSessionsOnly: boolean;
   size: DesktopPetSize;
+  showActionMenu: boolean;
+  openOnHover: boolean;
   workingBounceEnabled: boolean;
   workingBounceDistancePx: number;
   showStatus: boolean;
@@ -366,6 +373,8 @@ export interface Settings {
   ccusageUseWsl: boolean;
   windowsConptyCompatibilityFixEnabled: boolean;
   terminalSessionRestoreEnabled: boolean;
+  /** 恢复方式：启动时弹窗询问（默认）或静默自动恢复。仅在 terminalSessionRestoreEnabled 为真时生效。 */
+  terminalSessionRestoreMode: TerminalSessionRestoreMode;
   projectWorktreeConfigEnabled: boolean;
   symlinkCompatibilityEnabled: boolean;
   lowMemoryMode: boolean;
@@ -393,6 +402,7 @@ export interface Settings {
   claudeHookBridgeEnabled: boolean;
   codexHookBridgeEnabled: boolean;
   piHookBridgeEnabled: boolean;
+  grokHookBridgeEnabled: boolean;
   systemNotificationsEnabled: boolean;
   suppressSystemNotificationsWhenFocused: boolean;
   systemNotificationEvents: Record<HookEventType, boolean>;
@@ -410,6 +420,7 @@ export interface Settings {
   claudeHookAutoRepairNoticeShown: boolean;
   codexHookConfigDir: string | null;
   piHookConfigDir: string | null;
+  grokHookConfigDir: string | null;
   /** cc-switch 数据库路径；null 表示使用默认路径 ~/.cc-switch/cc-switch.db */
   ccSwitchDbPath: string | null;
   /** Git 变更树分组模式：directory（按目录树） / module（按顶层目录模块） */
@@ -520,6 +531,7 @@ const DEFAULTS: Settings = {
   ccusageUseWsl: false,
   windowsConptyCompatibilityFixEnabled: false,
   terminalSessionRestoreEnabled: true,
+  terminalSessionRestoreMode: "ask",
   projectWorktreeConfigEnabled: true,
   symlinkCompatibilityEnabled: false,
   lowMemoryMode: false,
@@ -555,6 +567,7 @@ const DEFAULTS: Settings = {
   claudeHookBridgeEnabled: true,
   codexHookBridgeEnabled: true,
   piHookBridgeEnabled: true,
+  grokHookBridgeEnabled: true,
   systemNotificationsEnabled: true,
   suppressSystemNotificationsWhenFocused: true,
   systemNotificationEvents: {
@@ -578,6 +591,7 @@ const DEFAULTS: Settings = {
   claudeHookAutoRepairNoticeShown: false,
   codexHookConfigDir: null,
   piHookConfigDir: null,
+  grokHookConfigDir: null,
   ccSwitchDbPath: null,
   gitGroupBy: "directory",
   confirmBeforeClosingTerminalTab: false,
@@ -591,7 +605,10 @@ const DEFAULTS: Settings = {
     enabled: false,
     petId: BUILTIN_DESKTOP_PET_ID,
     alwaysOnTop: true,
+    agentSessionsOnly: true,
     size: DESKTOP_PET_SIZE_DEFAULT_PERCENT,
+    showActionMenu: true,
+    openOnHover: true,
     workingBounceEnabled: false,
     workingBounceDistancePx: 5,
     showStatus: true,
@@ -1041,7 +1058,14 @@ export function migrateDesktopPetSettings(value: unknown): DesktopPetSettings {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : defaults.enabled,
     petId,
     alwaysOnTop: typeof raw.alwaysOnTop === "boolean" ? raw.alwaysOnTop : defaults.alwaysOnTop,
+    agentSessionsOnly:
+      typeof raw.agentSessionsOnly === "boolean"
+        ? raw.agentSessionsOnly
+        : defaults.agentSessionsOnly,
     size,
+    showActionMenu:
+      typeof raw.showActionMenu === "boolean" ? raw.showActionMenu : defaults.showActionMenu,
+    openOnHover: typeof raw.openOnHover === "boolean" ? raw.openOnHover : defaults.openOnHover,
     workingBounceEnabled:
       typeof raw.workingBounceEnabled === "boolean"
         ? raw.workingBounceEnabled
@@ -1268,6 +1292,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       typeof entries.terminalSessionRestoreEnabled === "boolean"
         ? entries.terminalSessionRestoreEnabled
         : DEFAULTS.terminalSessionRestoreEnabled;
+    entries.terminalSessionRestoreMode =
+      entries.terminalSessionRestoreMode === "ask" ||
+      entries.terminalSessionRestoreMode === "auto"
+        ? entries.terminalSessionRestoreMode
+        : DEFAULTS.terminalSessionRestoreMode;
     entries.projectWorktreeConfigEnabled =
       typeof entries.projectWorktreeConfigEnabled === "boolean"
         ? entries.projectWorktreeConfigEnabled
@@ -1356,6 +1385,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       typeof entries.piHookBridgeEnabled === "boolean"
         ? entries.piHookBridgeEnabled
         : DEFAULTS.piHookBridgeEnabled;
+    entries.grokHookBridgeEnabled =
+      typeof entries.grokHookBridgeEnabled === "boolean"
+        ? entries.grokHookBridgeEnabled
+        : DEFAULTS.grokHookBridgeEnabled;
     entries.systemNotificationsEnabled =
       typeof entries.systemNotificationsEnabled === "boolean"
         ? entries.systemNotificationsEnabled
@@ -1411,6 +1444,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     entries.piHookConfigDir =
       typeof entries.piHookConfigDir === "string" && entries.piHookConfigDir.trim()
         ? entries.piHookConfigDir
+        : null;
+    entries.grokHookConfigDir =
+      typeof entries.grokHookConfigDir === "string" && entries.grokHookConfigDir.trim()
+        ? entries.grokHookConfigDir
         : null;
     entries.ccSwitchDbPath =
       typeof entries.ccSwitchDbPath === "string" && entries.ccSwitchDbPath.trim()

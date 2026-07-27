@@ -19,6 +19,8 @@ use uuid::Uuid;
 const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 const MISSING_FINGERPRINT: &str = "missing";
 const ADAPTER_VERSION: u16 = 1;
+const CLAUDE_QUESTION_TOOL_NAME: &str = "AskUserQuestion";
+const CODEX_QUESTION_TOOL_NAME: &str = "request_user_input";
 
 const CLAUDE_HOOKS: &[(&str, &str, &str)] = &[
     ("SessionStart", "SessionStart", ""),
@@ -28,6 +30,7 @@ const CLAUDE_HOOKS: &[(&str, &str, &str)] = &[
         "Notification",
         "permission_prompt|idle_prompt",
     ),
+    ("PreToolUse", "Notification", CLAUDE_QUESTION_TOOL_NAME),
     ("Stop", "Stop", ""),
     ("StopFailure", "StopFailure", ""),
     ("SubagentStart", "SubagentStart", ""),
@@ -42,6 +45,7 @@ const CODEX_HOOKS: &[(&str, &str, &str)] = &[
     ("SessionStart", "SessionStart", ""),
     ("UserPromptSubmit", "UserPromptSubmit", ""),
     ("PermissionRequest", "PermissionRequest", ""),
+    ("PreToolUse", "Notification", CODEX_QUESTION_TOOL_NAME),
     ("Stop", "Stop", ""),
     ("SubagentStart", "SubagentStart", ""),
     ("SubagentStop", "SubagentStop", ""),
@@ -1584,7 +1588,7 @@ mod tests {
         add_exact_hooks(&mut value, Source::Claude, &expected).unwrap();
         assert_eq!(
             inspect_json(&value, Source::Claude, &expected).unwrap().0,
-            11
+            12
         );
         remove_exact_hooks(&mut value, Source::Claude, &expected).unwrap();
         assert_eq!(
@@ -1610,6 +1614,7 @@ mod tests {
         let expected = HashMap::from([
             ("SessionStart", "agent SessionStart".to_string()),
             ("UserPromptSubmit", "agent UserPromptSubmit".to_string()),
+            ("Notification", "agent Notification".to_string()),
             ("PermissionRequest", "agent PermissionRequest".to_string()),
             ("Stop", "agent Stop".to_string()),
             ("SubagentStart", "agent SubagentStart".to_string()),
@@ -1622,12 +1627,12 @@ mod tests {
             .unwrap()
             .push(duplicate);
         let (managed, conflict, outdated) = inspect_json(&value, Source::Codex, &expected).unwrap();
-        assert_eq!(managed, 6);
+        assert_eq!(managed, 7);
         assert!(!conflict);
         assert!(outdated);
         add_exact_hooks(&mut value, Source::Codex, &expected).unwrap();
         let (managed, conflict, outdated) = inspect_json(&value, Source::Codex, &expected).unwrap();
-        assert_eq!(managed, 6);
+        assert_eq!(managed, 7);
         assert!(!conflict);
         assert!(!outdated);
         remove_exact_hooks(&mut value, Source::Codex, &expected).unwrap();

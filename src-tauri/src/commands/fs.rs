@@ -98,6 +98,82 @@ pub struct ContentSearchMatch {
     pub after: Vec<String>,
 }
 
+/// 读取系统剪贴板中的 `CF_HDROP` 文件路径列表（Windows 资源管理器复制文件时写入的格式）。
+/// WebView2 的 ClipboardEvent 拿不到该格式，需走原生 Win32 API。非 Windows 平台返回空列表。
+#[tauri::command]
+pub async fn clipboard_read_file_paths() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(read_clipboard_file_paths)
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    const CF_HDROP: u32 = 15;
+
+    // OpenClipboard 可能因其他进程短暂占用而失败，静默返回空列表而非报错。
+    if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 {
+        return Ok(Vec::new());
+    }
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+    let _guard = ClipboardGuard;
+
+    let handle = unsafe { GetClipboardData(CF_HDROP) };
+    if handle.is_null() {
+        return Ok(Vec::new());
+    }
+
+    // GlobalLock 后 HDROP 才可用；解锁与关闭剪贴板分别由手动调用和 guard 负责。
+    let locked = unsafe { GlobalLock(handle as *mut _) };
+    if locked.is_null() {
+        return Ok(Vec::new());
+    }
+    let hdrop = locked as HDROP;
+
+    let count = unsafe { DragQueryFileW(hdrop, u32::MAX, std::ptr::null_mut(), 0) };
+    let mut paths = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        // 先查长度（不含结尾 NUL），再按长度 + 1 取内容。
+        let len = unsafe { DragQueryFileW(hdrop, index, std::ptr::null_mut(), 0) };
+        if len == 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; len as usize + 1];
+        let copied =
+            unsafe { DragQueryFileW(hdrop, index, buffer.as_mut_ptr(), buffer.len() as u32) };
+        if copied == 0 {
+            continue;
+        }
+        let path = std::ffi::OsString::from_wide(&buffer[..copied as usize]);
+        paths.push(path.to_string_lossy().into_owned());
+    }
+
+    unsafe {
+        GlobalUnlock(handle as *mut _);
+    }
+    Ok(paths)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
 #[tauri::command]
 pub async fn check_paths_exist(paths: Vec<String>) -> Result<Vec<bool>, String> {
     tokio::task::spawn_blocking(move || paths.iter().map(|p| path_exists(p)).collect())

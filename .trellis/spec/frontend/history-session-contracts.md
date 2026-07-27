@@ -10,13 +10,20 @@
 
 - SSH projects reuse the existing history workspace and source IDs (`claude` / `codex`); they do not introduce `ssh-claude` or `ssh-codex`.
 - The project supplies one Host/source/config-root/project-path context. Lists use cached catalog summaries first, then the Agent bridge; the first fetch requests 21 rows and displays 20.
+- A non-empty cached page renders immediately and starts one background forced refresh. A known remote identity with no cached rows still awaits a non-forced Agent page, so an already-published Agent index can answer without a scan. Manual refresh is forced; load-more is non-forced.
+- If the first non-forced Agent page still leaves an SSH project with no visible cached rows, the workspace may run one forced remote refresh to recover from a stale empty published index. This fallback is scoped to the active remote context and must not loop indefinitely.
+- Identical result-affecting sync inputs share one Promise even across different UI consumers. The RPC uses a request-owned bridge consumer rather than the first window's consumer, and releases it after settlement.
 - Load-more consumes cached rows first and only then advances the Agent `generation:offset` cursor. A generation change reloads from the first page instead of appending incompatible offsets.
 - Remote search requires the existing three-character minimum. Online search uses the Agent index; failure falls back only to cached summary matching and marks freshness stale/error.
 - Full messages, tool calls, sub-Agent records, and Diff are fetched on demand and retained only in the backend LRU. Offline detail is unavailable unless a separate explicit favorite snapshot exists.
 - Remote sessions are read-only: edit/delete are rejected, and remote paths never route to local file/Git/provider commands.
+- SSH remote lists must not merge local `session_favorite_snapshots` as missing-session fallbacks. Remote rows may apply ordinary `session_meta` display state, but the row set must come only from the remote source instance and remote project scope.
+- Local favorite metadata keys may differ by Windows path normalization such as `C:\...` vs `\\?\C:\...`; unfavoriting a local session must clear snapshots and starred state by source + session id, not only by the visible session key.
 - Resume first checks current SSH tabs by Host/source-instance/session identity. Otherwise it runs Agent preflight, offers only same-Host/source/config-root SSH projects, or an explicit original-remote-location option when no project matches.
 - The resume command is returned by Rust after validating structured Agent args; the WebView never interpolates a session ID into shell syntax. Project startup commands are replaced, normal project environment plus canonical `CLAUDE_CONFIG_DIR`/`CODEX_HOME` are retained, and provider overrides remain disabled.
 - Open/list/load-more/search/detail requests are generation-guarded. Results from a previous SSH project, filter, query, or selected session must not overwrite the current consumer, and stale `finally` handlers must not clear current loading state.
+- Opening a history workspace for an SSH project must resolve the maintained project to `remote_path` even when the caller supplies the desktop-local `project.path` or only a project id.
+- The History workspace refresh button must not open the external local Claude/Codex project-sync dialog while `remoteContext` is active. For SSH projects it means "refresh remote history", not "find local syncable projects".
 
 ### 3. Tests Required
 
@@ -230,24 +237,29 @@ if (existingProject && matchesProjectSource(existingProject, group.source)) cont
 ### 2. Signatures
 
 - Project candidates: `findHistoryProjects(session, projects): Project[]`.
+- Source-agnostic directory candidates: `findLocalHistoryCwdProjects(session, projects): Project[]`.
 - Command builder: `appendResumeCliArgs(baseCommand, source, project): string`.
 - Terminal creation keeps the existing `terminalStore.createSession(...)` contract.
 
 ### 3. Contracts
 
 - Both the detail action and list context-menu action must enter the same resume flow.
+- The detail action may resume only when the loaded detail identity (source, session id, and file path) matches the currently selected history view.
 - Match maintained projects by history `cwd` first, then by `project_key`, and require the project's CLI type to match the history source.
 - One candidate resumes directly; multiple candidates require explicit selection; cancel creates no terminal.
 - The selected project supplies `cli_args`, provider overrides, environment variables, shell, and Worktree overrides.
 - Existing session-selection fragments in project `cli_args` must be removed before the selected history session's resume command is built; ordinary CLI arguments and Provider overrides remain in effect.
-- Zero matching candidates must show all maintained projects plus a localized `Use New Window` option instead of stopping with an error.
+- When no source-compatible project exists but the history `cwd` exactly matches one local/WSL maintained project, resume immediately with `Use New Window` semantics. The matched directory is identity evidence only: do not inherit that other CLI's project id, CLI arguments, environment variables, provider overrides, or Agent metadata. Its Shell type may be reused only to preserve the local/WSL runtime boundary.
+- Otherwise, zero matching candidates must show all maintained projects plus a localized `Use New Window` option instead of stopping with an error. Duplicate exact-`cwd` projects still require explicit selection.
 - `Use New Window` creates an unscoped internal terminal with the resolved history working directory as PTY `cwd`, then runs the bare resume command without project CLI arguments.
 - If no working directory can be resolved, stop with a localized error and create no terminal.
 
 ### 4. Validation & Error Matrix
 
 - Invalid session ID or unsupported source -> localized error, no terminal.
-- Zero compatible project candidates -> show all projects plus `Use New Window`; cancel -> no terminal.
+- Missing or stale detail whose identity differs from the selected view -> keep resume disabled and create no terminal.
+- Zero compatible project candidates + one exact local/WSL `cwd` project -> resume directly with the bare source command and no project launch configuration.
+- Zero compatible project candidates + zero/multiple exact `cwd` projects -> show all projects plus `Use New Window`; cancel -> no terminal.
 - `Use New Window` + valid history working directory -> create an unscoped terminal in that directory, then run the resume command.
 - `Use New Window` + missing history working directory -> localized error, no terminal.
 - One compatible candidate -> create the terminal with its launch configuration.
@@ -257,6 +269,7 @@ if (existingProject && matchesProjectSource(existingProject, group.source)) cont
 ### 5. Good/Base/Bad Cases
 
 - Good: two Claude project records match one history directory; the user selects one and its `cli_args` appear after `claude --resume <id>`.
+- Good: a Claude session converted to Codex has only one Claude project at the same `cwd`; Codex resumes directly in that directory without receiving Claude launch configuration.
 - Base: one Codex project matches exactly and resumes without an extra prompt.
 - Bad: project lookup uses `find()` and silently chooses the first duplicate.
 - Bad: zero matching projects immediately produce an error without offering a manual project choice.
@@ -266,6 +279,8 @@ if (existingProject && matchesProjectSource(existingProject, group.source)) cont
 
 - Run `npx tsc --noEmit`.
 - Run `node scripts/resumeCliArgs.test.mjs`.
+- Run `node scripts/historyResumeProject.test.mjs`.
+- Run `node scripts/historySessionIdentity.test.mjs` and `node scripts/historyConversionState.test.mjs`.
 - Manually verify detail and context-menu resume for Claude/Codex, one/multiple/no candidates, picker cancel, Local/WSL/Bash, and main project/Worktree.
 - Switch between `zh-CN`, `zh-TW`, and `en-US` and verify picker, aria labels, and errors.
 
@@ -282,9 +297,103 @@ const command = appendResumeCliArgs(baseCommand, source, project);
 
 ```typescript
 const candidates = findHistoryProjects(session, projects);
+const cwdProjects = findLocalHistoryCwdProjects(session, projects);
+if (candidates.length === 0 && cwdProjects.length === 1) {
+  return resumeWithoutProject(session, { shell: cwdProjects[0].shell });
+}
 if (candidates.length === 0) return openProjectPicker(projects, { allowNewWindow: true });
 if (candidates.length > 1) return openProjectPicker(candidates);
 return resumeWithProject(session, candidates[0]);
+```
+
+## Scenario: Activate a Newly Converted Session
+
+### 1. Scope / Trigger
+
+- Trigger: changing Claude/Codex conversion results, `historyStore.addConvertedSession`, or detail request state.
+- Goal: a converted target session is usable immediately without waiting for the rebuildable history catalog.
+
+### 2. Contracts
+
+- `history_convert_session` returns a target summary plus a target detail already parsed by the backend.
+- `addConvertedSession(summary, detail)` verifies their source/session id/file path identity, invalidates any older detail request, and sets the list row, active key, and active detail in one Store update.
+- `openSession` and `openSearchHit` clear the previous `activeSession` before awaiting another detail; request sequence guards still prevent stale results and stale `finally` handlers from winning.
+- Conversion success does not immediately invoke `history_get_session`; ordinary later opens still use the indexed read path.
+
+### 3. Validation Matrix
+
+- Target catalog row is not ready -> converted detail renders from the conversion response; no `session_file_not_indexed`.
+- A later ordinary open of a converted Claude session -> the summary project key matches the backend inventory key, including an existing Windows directory's actual casing.
+- An older detail request completes after conversion -> request sequence mismatch prevents overwrite.
+- A new detail request fails without a favorite snapshot -> active detail remains empty; resume cannot use the previous session.
+- Summary/detail identity differs -> reject with `history_conversion_detail_mismatch` and do not activate it.
+
+### 4. Tests Required
+
+- Run `node scripts/historySessionIdentity.test.mjs`.
+- Run `node scripts/historyConversionState.test.mjs`.
+- Run `npx tsc --noEmit`.
+
+## Scenario: Background History List Refresh
+
+### 1. Scope / Trigger
+
+- Trigger: changing history-index ready events, manual history refresh, remote cached refresh, list pagination, or the history loading state.
+- Goal: refreshing an already rendered list must preserve its scroll geometry and loaded range instead of replacing it with one loading row.
+
+### 2. Signatures
+
+- Store action: `loadSessions(options?: { background?: boolean }): Promise<void>`.
+- Automatic local refresh: `history-index-status` with a new ready generation calls `loadSessions({ background: true })`.
+- Manual local/remote refresh calls `loadSessions({ background: true })` after the index or remote cache is updated.
+
+### 3. Contracts
+
+- Background mode is active only when the Store already has sessions. An empty list falls back to foreground loading so the initial state remains explicit.
+- Background mode keeps `loadingSessions=false` and leaves the current rows mounted while the request is in flight.
+- The request limit is `max(SESSION_PAGE_SIZE, sessionListOffset) + 1`; refresh must reload every source row already paged into the list and use the extra row to recompute `hasMoreSessions`.
+- Foreground loads caused by initial open or source/project filter changes may reset pagination and show the blocking loading row.
+- Request-sequence and remote-consumer guards remain authoritative; a stale refresh cannot replace a newer filter, remote context, or pagination result.
+- `visibleSessionCount` resets only when the visible filter/query changes, not when `loadingSessions` changes.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Ready generation changes while rows are visible | Refresh in background; keep list height and scroll position |
+| Manual refresh while more than one page is loaded | Reload the current loaded range; do not shrink to 20 rows |
+| Background option is requested with an empty Store | Use foreground loading and fetch the first page |
+| Source or project filter changes | Use foreground loading and reset the source offset |
+| Older refresh completes after a newer list request | Ignore the stale result through `sessionListRequestSeq` |
+| Refreshed active session is no longer present | Select the first remaining session and clear stale detail |
+
+### 5. Good / Base / Bad Cases
+
+- Good: the user scrolls midway through 60 sessions; an index-ready event refreshes 60 rows without moving the viewport to the top.
+- Good: manual refresh preserves the rows already loaded and then reruns an active global search.
+- Base: opening history with no cached rows still displays the existing loading state.
+- Bad: set `loadingSessions=true` for every ready event; the virtualizer collapses to one 56 px row and the browser clamps `scrollTop` to zero.
+- Bad: background refresh always requests 21 rows; a user who loaded later pages loses them after every index update.
+
+### 6. Tests Required
+
+- Run `node --test scripts/historyListRefreshState.test.mjs` and assert automatic/manual refresh use background mode, the loaded offset determines the fetch limit, and loading does not reset visible rows.
+- Run `npx tsc --noEmit`.
+- Manually scroll a multi-page local and SSH history list, trigger automatic and manual refresh, and verify the viewport and loaded range remain stable.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+set({ loadingSessions: true, sessionListOffset: 0 });
+await get().loadSessions();
+```
+
+#### Correct
+
+```typescript
+await get().loadSessions({ background: true });
 ```
 
 ## Scenario: History File Change Records

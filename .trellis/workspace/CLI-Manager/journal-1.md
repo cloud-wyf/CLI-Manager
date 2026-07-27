@@ -1025,7 +1025,106 @@ Claude 启动阶段提前订阅子任务 transcript，Codex rollout 增加有界
 - None - task complete
 
 
-## Session 31: 修复 Web Server 迁移校验漂移
+## Session 31: 修复 Codex 子任务窗格自动关闭
+
+**Date**: 2026-07-23
+**Task**: 修复 Codex 子任务窗格自动关闭
+**Branch**: `master`
+
+### Summary
+
+为 Codex 子任务转录补充 task_complete/turn_aborted 终态兜底，统一自动关闭延迟并更新契约与文档。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0347ab8e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 32: 修复跨 Workspan 终端空白
+
+**Date**: 2026-07-23
+**Task**: 修复跨 Workspan 终端空白
+**Branch**: `master`
+
+### Summary
+
+修复普通终端跨 Workspan 分屏重挂载时 StrictMode 探测实例覆盖有效快照的问题，并补充重挂载输出契约测试。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5cd5011d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 33: 完善终端 Tab 悬浮信息卡
+
+**Date**: 2026-07-24
+**Task**: 完善终端 Tab 悬浮信息卡
+**Branch**: `master`
+
+### Summary
+
+修复 Workspan 单会话 Tab 悬浮卡缺失，使悬浮卡跟随终端主题，并补齐字段图标、CLI 厂商图标与路径复制。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `592729e9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 34: 修复 Web Server 迁移校验漂移
 
 **Date**: 2026-07-22
 **Task**: 修复 Web Server 迁移校验漂移

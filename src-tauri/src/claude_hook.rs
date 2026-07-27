@@ -1,9 +1,9 @@
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -12,6 +12,35 @@ use crate::third_party_notification::HookNotificationJob;
 const REQUEST_PATH: &str = "/api/claude-hook";
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+const RECENT_HOOK_EVENT_LIMIT: usize = 1024;
+const CLAUDE_QUESTION_TOOL_NAME: &str = "AskUserQuestion";
+const CODEX_QUESTION_TOOL_NAME: &str = "request_user_input";
+
+#[derive(Default)]
+struct RecentHookEvents {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl RecentHookEvents {
+    fn accept(&mut self, event_id: Option<&str>) -> bool {
+        let Some(event_id) = event_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return true;
+        };
+        if self.ids.contains(event_id) {
+            return false;
+        }
+        let event_id = event_id.to_string();
+        self.ids.insert(event_id.clone());
+        self.order.push_back(event_id);
+        while self.order.len() > RECENT_HOOK_EVENT_LIMIT {
+            if let Some(expired) = self.order.pop_front() {
+                self.ids.remove(&expired);
+            }
+        }
+        true
+    }
+}
 
 /// hook 上报的消费出口：主进程实现为 Tauri 事件，daemon 实现为帧广播 + 缓存
 /// （Issue #123 Phase 2 复用点：HTTP 解析/校验逻辑两侧共享，只有出口不同）。
@@ -72,6 +101,7 @@ pub struct ClaudeHookPayload {
     environment_type: Option<String>,
     remote_host_id: Option<String>,
     remote_project_id: Option<String>,
+    remote_project_name: Option<String>,
     remote_transcript_ref: Option<String>,
     remote_agent_transcript_ref: Option<String>,
     remote_event_id: Option<String>,
@@ -83,19 +113,29 @@ impl ClaudeHookPayload {
         &self.tab_id
     }
 
-    pub fn event(&self) -> &str {
-        &self.event
+    pub fn requires_user_response(&self) -> bool {
+        self.event == "PermissionRequest"
+            || (self.event == "Notification"
+                && matches!(
+                    (self.source.as_str(), self.tool_name.as_deref()),
+                    ("claude", Some(CLAUDE_QUESTION_TOOL_NAME))
+                        | ("codex", Some(CODEX_QUESTION_TOOL_NAME))
+                ))
+    }
+
+    pub fn with_remote_project_name(mut self, project_name: String) -> Self {
+        self.remote_project_name =
+            (!project_name.trim().is_empty()).then(|| project_name.trim().to_string());
+        self
     }
 
     pub fn to_notification_job(&self) -> HookNotificationJob {
+        let is_ssh = self.environment_type.as_deref() == Some("ssh");
         HookNotificationJob {
             source: self.source.clone(),
             event: self.event.clone(),
-            cwd: if self.environment_type.as_deref() == Some("ssh") {
-                None
-            } else {
-                self.cwd.clone()
-            },
+            cwd: (!is_ssh).then(|| self.cwd.clone()).flatten(),
+            project: is_ssh.then(|| self.remote_project_name.clone()).flatten(),
             timestamp: self.timestamp.clone(),
         }
     }
@@ -104,13 +144,15 @@ impl ClaudeHookPayload {
 /// 在给定 listener 上跑 hook HTTP 服务：解析/鉴权/校验后把 payload 交给 sink。
 /// daemon 与主进程共用（Issue #123 Phase 2）。
 pub fn spawn_hook_listener(listener: TcpListener, token: String, sink: HookPayloadSink) {
+    let recent_events = Arc::new(Mutex::new(RecentHookEvents::default()));
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let token = token.clone();
                     let sink = Arc::clone(&sink);
-                    thread::spawn(move || handle_stream(stream, sink, &token));
+                    let recent_events = Arc::clone(&recent_events);
+                    thread::spawn(move || handle_stream(stream, sink, &token, recent_events));
                 }
                 Err(err) => warn!("cli hook bridge accept failed: {}", err),
             }
@@ -118,7 +160,12 @@ pub fn spawn_hook_listener(listener: TcpListener, token: String, sink: HookPaylo
     });
 }
 
-fn handle_stream(mut stream: TcpStream, sink: HookPayloadSink, token: &str) {
+fn handle_stream(
+    mut stream: TcpStream,
+    sink: HookPayloadSink,
+    token: &str,
+    recent_events: Arc<Mutex<RecentHookEvents>>,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let request = match read_request(&mut stream) {
         Ok(request) => request,
@@ -158,6 +205,15 @@ fn handle_stream(mut stream: TcpStream, sink: HookPayloadSink, token: &str) {
         return;
     }
 
+    let accepted = recent_events
+        .lock()
+        .map(|mut recent| recent.accept(payload.remote_event_id.as_deref()))
+        .unwrap_or(true);
+    if !accepted {
+        write_response(&mut stream, "204 No Content", "");
+        return;
+    }
+
     log_hook_payload_diagnostic(&payload);
 
     let payload = ClaudeHookPayload {
@@ -182,6 +238,7 @@ fn handle_stream(mut stream: TcpStream, sink: HookPayloadSink, token: &str) {
         environment_type: payload.environment_type,
         remote_host_id: payload.remote_host_id,
         remote_project_id: payload.remote_project_id,
+        remote_project_name: None,
         remote_transcript_ref: payload.remote_transcript_ref,
         remote_agent_transcript_ref: payload.remote_agent_transcript_ref,
         remote_event_id: payload.remote_event_id,
@@ -291,6 +348,7 @@ pub fn remote_hook_payload_from_spool(
         environment_type: request.environment_type,
         remote_host_id: request.remote_host_id,
         remote_project_id: request.remote_project_id,
+        remote_project_name: None,
         remote_transcript_ref: request.remote_transcript_ref,
         remote_agent_transcript_ref: request.remote_agent_transcript_ref,
         remote_event_id: request.remote_event_id,
@@ -381,6 +439,13 @@ fn is_valid_payload(payload: &ClaudeHookRequest) -> bool {
     if tab_id.is_empty() || tab_id.len() > 128 {
         return false;
     }
+    if payload
+        .remote_event_id
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
+    {
+        return false;
+    }
 
     match normalize_source(payload.source.as_deref()) {
         "claude" => matches!(
@@ -397,10 +462,26 @@ fn is_valid_payload(payload: &ClaudeHookRequest) -> bool {
                 | "ToolStart"
                 | "ToolStop"
         ),
+        "grok" => matches!(
+            payload.event.as_str(),
+            "SessionStart"
+                | "UserPromptSubmit"
+                | "Notification"
+                | "PermissionRequest"
+                | "Stop"
+                | "StopFailure"
+                | "SubagentStart"
+                | "SubagentStop"
+                | "AgentToolStart"
+                | "AgentToolStop"
+                | "ToolStart"
+                | "ToolStop"
+        ),
         "codex" => matches!(
             payload.event.as_str(),
             "SessionStart"
                 | "UserPromptSubmit"
+                | "Notification"
                 | "PermissionRequest"
                 | "Stop"
                 | "SubagentStart"
@@ -467,6 +548,7 @@ fn normalize_source(source: Option<&str>) -> &str {
     match source {
         Some("codex") => "codex",
         Some("pi") => "pi",
+        Some("grok") => "grok",
         Some("claude") | None => "claude",
         _ => "",
     }
@@ -482,12 +564,108 @@ fn write_response(stream: &mut TcpStream, status: &str, body: &str) {
 }
 
 #[cfg(test)]
+mod validation_tests {
+    use super::{
+        is_valid_payload, normalize_source, ClaudeHookRequest, RecentHookEvents,
+        RECENT_HOOK_EVENT_LIMIT,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn normalizes_and_accepts_grok_hook_events() {
+        assert_eq!(normalize_source(Some("grok")), "grok");
+
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "Notification",
+            "PermissionRequest",
+            "Stop",
+            "StopFailure",
+            "SubagentStart",
+            "SubagentStop",
+            "AgentToolStart",
+            "AgentToolStop",
+            "ToolStart",
+            "ToolStop",
+        ] {
+            let request: ClaudeHookRequest = serde_json::from_value(json!({
+                "tabId": "external:grok:session",
+                "source": "grok",
+                "event": event,
+            }))
+            .expect("test payload should deserialize");
+            assert!(
+                is_valid_payload(&request),
+                "Grok event should be valid: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_grok_hook_events() {
+        let request: ClaudeHookRequest = serde_json::from_value(json!({
+            "tabId": "external:grok:session",
+            "source": "grok",
+            "event": "UnknownEvent",
+        }))
+        .expect("test payload should deserialize");
+
+        assert!(!is_valid_payload(&request));
+    }
+
+    #[test]
+    fn accepts_codex_question_notification_and_rejects_unknown_event() {
+        let notification: ClaudeHookRequest = serde_json::from_value(json!({
+            "tabId": "external:codex:session",
+            "source": "codex",
+            "event": "Notification",
+            "toolName": "request_user_input",
+        }))
+        .expect("test payload should deserialize");
+        assert!(is_valid_payload(&notification));
+
+        let unknown: ClaudeHookRequest = serde_json::from_value(json!({
+            "tabId": "external:codex:session",
+            "source": "codex",
+            "event": "UnknownEvent",
+        }))
+        .expect("test payload should deserialize");
+        assert!(!is_valid_payload(&unknown));
+    }
+
+    #[test]
+    fn deduplicates_bounded_hook_event_ids() {
+        let mut recent = RecentHookEvents::default();
+        assert!(recent.accept(Some("event-1")));
+        assert!(!recent.accept(Some("event-1")));
+        assert!(recent.accept(None));
+
+        for index in 0..=RECENT_HOOK_EVENT_LIMIT {
+            assert!(recent.accept(Some(&format!("event-{index}-next"))));
+        }
+        assert!(recent.accept(Some("event-1")));
+    }
+
+    #[test]
+    fn rejects_invalid_hook_event_id() {
+        let request: ClaudeHookRequest = serde_json::from_value(json!({
+            "tabId": "tab",
+            "source": "grok",
+            "event": "SessionStart",
+            "remoteEventId": ""
+        }))
+        .expect("test payload should deserialize");
+        assert!(!is_valid_payload(&request));
+    }
+}
+
+#[cfg(test)]
 mod remote_tests {
     use super::remote_hook_payload_from_spool;
     use serde_json::json;
 
-    #[test]
-    fn remote_hook_notification_job_omits_remote_cwd() {
+    fn remote_notification_job(source: &str) -> super::ClaudeHookPayload {
         let payload = remote_hook_payload_from_spool(&json!({
             "kind": "hookEvent",
             "eventId": "00000000-0000-4000-8000-000000000001",
@@ -495,12 +673,56 @@ mod remote_tests {
             "hostId": "host",
             "projectId": "project",
             "tabId": "00000000-0000-4000-8000-000000000002",
-            "source": "claude",
+            "source": source,
             "event": "Stop",
             "remoteCwd": "/srv/private-project",
             "occurredAt": 1
         }))
         .unwrap();
-        assert_eq!(payload.to_notification_job().cwd, None);
+        payload
+    }
+
+    fn remote_question_notification(source: &str, tool_name: &str) -> super::ClaudeHookPayload {
+        remote_hook_payload_from_spool(&json!({
+            "kind": "hookEvent",
+            "eventId": "00000000-0000-4000-8000-000000000001",
+            "sequence": 1,
+            "hostId": "host",
+            "projectId": "project",
+            "tabId": "00000000-0000-4000-8000-000000000002",
+            "source": source,
+            "event": "Notification",
+            "toolName": tool_name,
+            "remoteCwd": "/srv/private-project",
+            "occurredAt": 1
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn question_notifications_require_user_response() {
+        assert!(remote_question_notification("claude", "AskUserQuestion").requires_user_response());
+        assert!(
+            remote_question_notification("codex", "request_user_input").requires_user_response()
+        );
+        assert!(!remote_question_notification("codex", "Read").requires_user_response());
+    }
+
+    #[test]
+    fn remote_claude_notification_omits_cwd_and_keeps_safe_project_label() {
+        let payload = remote_notification_job("claude")
+            .with_remote_project_name("Sidebar Project".to_string());
+        let job = payload.to_notification_job();
+        assert_eq!(job.cwd, None);
+        assert_eq!(job.project.as_deref(), Some("Sidebar Project"));
+    }
+
+    #[test]
+    fn remote_codex_notification_omits_cwd_and_keeps_safe_project_label() {
+        let payload = remote_notification_job("codex")
+            .with_remote_project_name("Sidebar Project".to_string());
+        let job = payload.to_notification_job();
+        assert_eq!(job.cwd, None);
+        assert_eq!(job.project.as_deref(), Some("Sidebar Project"));
     }
 }

@@ -3,11 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getDb } from "../lib/db";
 import { createPerfMarker, logInfo, logWarn } from "../lib/logger";
-import { normalizeHistoryProjectPaths } from "../lib/historyProjectPaths";
+import { normalizeHistoryProjectPaths, resolveHistoryProjectPath } from "../lib/historyProjectPaths";
 import { buildSshAgentHistoryContext, type SshAgentHistoryContext } from "../lib/sshAgentHistory";
 import { ensureHistorySourceSettingsLoaded, getHistoryPathArgs, getHistoryPathArgsSync } from "../lib/historyPathArgs";
+import { inferSubagentParentSessionId } from "../lib/historySubagents";
+import { sameHistorySessionIdentity } from "../lib/historySessionIdentity";
 import { useProjectStore } from "./projectStore";
 import { useSshAgentIntegrationStore } from "./sshAgentIntegrationStore";
+import { useBackgroundOperationStore } from "./backgroundOperationStore";
 import type {
   HistoryBackupStatus,
   HistoryEditAuditEntry,
@@ -33,6 +36,7 @@ import type {
   HistoryToolEvent,
   HistoryToolCount,
   PromptScope,
+  Project,
   HistorySource,
   HistorySourceFilter,
   SessionFavoriteSnapshot,
@@ -99,11 +103,11 @@ interface HistoryStore {
   toggleHistory: () => Promise<void>;
   setSourceFilter: (filter: HistorySourceFilter) => Promise<void>;
   setProjectPathFilter: (projectPath: string | null, projectId?: string | null) => Promise<void>;
-  loadSessions: () => Promise<void>;
+  loadSessions: (options?: { background?: boolean }) => Promise<void>;
   loadMoreSessions: () => Promise<void>;
   loadIndexStatus: () => Promise<void>;
   refreshIndex: () => Promise<void>;
-  addConvertedSession: (summary: unknown) => string;
+  addConvertedSession: (summary: unknown, detail: unknown) => string;
   openSession: (sessionKey: string) => Promise<void>;
   openSearchHit: (hit: HistorySearchHit) => Promise<void>;
   deleteSession: (sessionKey: string) => Promise<void>;
@@ -176,6 +180,19 @@ interface StatsProjectOptionsCacheEntry {
 
 function effectiveProjectPathFilter(state: Pick<HistoryStore, "projectPathFilter" | "scopedProjectPathFilter">): string | null {
   return state.scopedProjectPathFilter ?? state.projectPathFilter;
+}
+
+function findHistoryProject(projects: Project[], projectId: string | null, projectPath: string | null): Project | undefined {
+  if (projectId) {
+    const byId = projects.find((item) => item.id === projectId);
+    if (byId) return byId;
+  }
+  const normalizedPath = projectPath?.trim();
+  if (!normalizedPath) return undefined;
+  return projects.find((item) => {
+    const historyPath = resolveHistoryProjectPath(item);
+    return historyPath === normalizedPath || item.path.trim() === normalizedPath || item.remote_path.trim() === normalizedPath;
+  });
 }
 
 function remoteSourceMatchesFilter(
@@ -308,6 +325,7 @@ function normalizeSummary(raw: unknown): HistorySessionSummary {
       ? remoteIdentityRaw as HistorySessionSummary["remote_identity"]
       : null,
     read_only: rec.read_only === true || rec.readOnly === true,
+    usage: normalizeSessionUsage(rec.usage),
   };
 }
 
@@ -718,6 +736,7 @@ export interface FetchHistoryStatsOptions {
   sourceFilter: HistorySourceFilter;
   projectKey?: string | null;
   projectPath?: string | null;
+  sourceInstanceId?: string | null;
   rangeDays?: number | null;
   startAt?: number | null;
   endAt?: number | null;
@@ -735,6 +754,7 @@ export async function fetchHistoryStatsProjectOptions(sourceFilter: HistorySourc
 export async function fetchHistoryStatsPayload(options: FetchHistoryStatsOptions): Promise<HistoryStatsPayload> {
   const projectKey = options.projectKey?.trim() || null;
   const projectPath = options.projectPath?.trim() || null;
+  const sourceInstanceId = options.sourceInstanceId?.trim() || null;
   const startAt = typeof options.startAt === "number" && Number.isFinite(options.startAt) ? options.startAt : null;
   const endAt = typeof options.endAt === "number" && Number.isFinite(options.endAt) ? options.endAt : null;
   const rangeDays = options.rangeDays ?? 30;
@@ -744,6 +764,7 @@ export async function fetchHistoryStatsPayload(options: FetchHistoryStatsOptions
     ...(await getHistoryPathArgs()),
     projectKey,
     projectPath,
+    sourceInstanceId,
     rangeDays,
     startAt,
     endAt,
@@ -752,11 +773,34 @@ export async function fetchHistoryStatsPayload(options: FetchHistoryStatsOptions
   return normalizeStats(raw);
 }
 
+export async function fetchRemoteHistoryStatsPayload(
+  project: Project,
+  options: FetchHistoryStatsOptions,
+): Promise<HistoryStatsPayload> {
+  let context = await buildSshAgentHistoryContext(project);
+  try {
+    const force = options.force ?? false;
+    context = await syncRemoteHistoryContext(context, { limit: 1000, forceRefresh: force });
+    return await fetchHistoryStatsPayload({
+      ...options,
+      projectKey: null,
+      projectPath: project.remote_path,
+      sourceInstanceId: context.sourceInstanceId,
+      force,
+    });
+  } finally {
+    void invoke("history_remote_close", {
+      hostId: context.hostId,
+      consumerId: context.consumerId,
+    }).catch(() => undefined);
+  }
+}
+
 // 供终端统计面板使用：按项目路径取最近一次 CLI 会话详情，不改动历史工作区的选中状态。
 // source 非空时只匹配对应 CLI（claude/codex），供按终端工具区分的场景使用。
 // 传入 prev（上次结果的 file_path/updated_at）时，若最近会话未变化则返回 "unchanged"，
 // 跳过整个 jsonl 的重新解析，供轮询场景使用。
-// forceCatalogRefresh：Hook 刚绑定 sessionId / 用量仍为 0 时强制扫盘索引，避免 catalog TTL 导致侧栏空等再闪出。
+// forceCatalogRefresh：Hook 刚绑定 sessionId / 用量仍为 0 时后台触发扫盘索引；查询保持非阻塞。
 export async function fetchLatestProjectSessionDetail(
   projectPath: string,
   prev?: { filePath: string; updatedAt: number },
@@ -802,7 +846,7 @@ export async function fetchLatestProjectSessionDetail(
     };
 
     // 绑定了 CLI sessionId 时：先按项目过滤找，失败再仅按 sessionId 找（Pi 等 cwd/project_key 口径与 Claude 不同）。
-    // 仍 miss 时强制刷新 catalog 再试一次，避免新会话落盘后 10s TTL 内侧栏一直空白。
+    // 仍 miss 时后台刷新 catalog 再试一次；Grok 精确 sessionId 可由后端绕过 catalog 直接命中。
     const sessionQuery = cliSessionId?.trim() || null;
     const resolveBoundSummary = async (): Promise<HistorySessionSummary | null> => {
       if (!sessionQuery) {
@@ -814,7 +858,7 @@ export async function fetchLatestProjectSessionDetail(
       if (summary?.session_id === sessionQuery) return summary;
       if (!forceCatalogRefresh) return null;
       try {
-        await invoke("history_refresh_index", { ...pathArgs, wait: true });
+        await invoke("history_refresh_index", { ...pathArgs, wait: false });
       } catch (error) {
         logWarn("history.realtime.lookup.refreshFailed", {
           source: source ?? null,
@@ -895,6 +939,7 @@ export async function fetchDiscoveredModels(): Promise<string[]> {
     source: null,
     ...(await getHistoryPathArgs()),
     projectKey: null,
+    sourceInstanceId: null,
     rangeDays: null,
     startAt: null,
     endAt: null,
@@ -924,6 +969,7 @@ export async function fetchTodayProjectStats(
       projectKey: normalizedProjectPath || hasProjectPaths ? null : projectKey,
       projectPath: hasProjectPaths ? null : normalizedProjectPath,
       projectPaths: hasProjectPaths ? normalizedProjectPaths : null,
+      sourceInstanceId: null,
       rangeDays: null,
       startAt: todayStart.getTime(),
       endAt: Date.now(),
@@ -964,11 +1010,77 @@ export async function fetchTodayProjectStatsMerged(
   return fetchTodayProjectStats(projectKey, source, null, uniquePaths);
 }
 
+export async function fetchRemoteTodayProjectStats(
+  context: SshAgentHistoryContext,
+): Promise<{ context: SshAgentHistoryContext; result: TodayProjectStats | null }> {
+  const synced = await syncRemoteHistoryContext(context, { limit: 200 });
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const raw = await invoke<unknown>("history_get_stats", {
+    source: synced.source,
+    ...(await getHistoryPathArgs()),
+    projectKey: null,
+    projectPath: null,
+    projectPaths: synced.projectPaths,
+    sourceInstanceId: synced.sourceInstanceId,
+    rangeDays: null,
+    startAt: todayStart.getTime(),
+    endAt: Date.now(),
+    force: false,
+  });
+  const stats = normalizeStats(raw);
+  return {
+    context: synced,
+    result: {
+      sessions: stats.total_sessions,
+      totalTokens:
+        stats.total_input_tokens +
+        stats.total_output_tokens +
+        stats.total_cache_read_tokens +
+        stats.total_cache_creation_tokens,
+      totalCostUsd: stats.total_cost_usd,
+      inputTokens: stats.total_input_tokens,
+      outputTokens: stats.total_output_tokens,
+      cacheReadTokens: stats.total_cache_read_tokens,
+      cacheCreationTokens: stats.total_cache_creation_tokens,
+      unpricedTokens: stats.total_unpriced_tokens,
+    },
+  };
+}
+
 export async function fetchRemoteLatestProjectSessionDetail(
   context: SshAgentHistoryContext,
   prev?: { filePath: string; updatedAt: number },
   cliSessionId?: string | null,
+  remoteTranscriptRef?: string | null,
 ): Promise<{ context: SshAgentHistoryContext; result: HistorySessionDetail | "unchanged" | null }> {
+  const requestedSessionId = cliSessionId?.trim() || null;
+  if (requestedSessionId) {
+    try {
+      const detailRaw = await invoke<unknown>("history_remote_get_session", {
+        consumerId: context.consumerId,
+        sshLaunch: context.launch,
+        source: context.source,
+        configuredConfigRoot: context.configuredConfigRoot,
+        projectPaths: context.projectPaths,
+        sourceInstanceId: context.sourceInstanceId,
+        sourceSessionId: requestedSessionId,
+        remoteTranscriptRef: remoteTranscriptRef?.trim() || null,
+      });
+      const detail = normalizeDetail(detailRaw);
+      if (detail.session_id !== requestedSessionId) return { context, result: null };
+      const sourceInstanceId = detail.session_ref?.sourceInstanceId || context.sourceInstanceId;
+      const nextContext = sourceInstanceId === context.sourceInstanceId
+        ? context
+        : { ...context, sourceInstanceId };
+      if (prev && detail.file_path === prev.filePath && detail.updated_at === prev.updatedAt) {
+        return { context: nextContext, result: "unchanged" };
+      }
+      return { context: nextContext, result: detail };
+    } catch {
+      return { context, result: null };
+    }
+  }
   const synced = await syncRemoteHistoryContext(context, { limit: SESSION_PAGE_FETCH_LIMIT });
   if (!synced.sourceInstanceId) return { context: synced, result: null };
   const summariesRaw = await invoke<unknown[]>("history_remote_list_cached", {
@@ -979,10 +1091,7 @@ export async function fetchRemoteLatestProjectSessionDetail(
     offset: 0,
   });
   const summaries = (summariesRaw ?? []).map((item) => normalizeSummary(item));
-  const requestedSessionId = cliSessionId?.trim() || null;
-  const summary = requestedSessionId
-    ? summaries.find((item) => item.session_id === requestedSessionId) ?? null
-    : summaries[0] ?? null;
+  const summary = summaries[0] ?? null;
   if (!summary) return { context: synced, result: null };
   if (prev && summary.file_path === prev.filePath && summary.updated_at === prev.updatedAt) {
     return { context: synced, result: "unchanged" };
@@ -995,6 +1104,7 @@ export async function fetchRemoteLatestProjectSessionDetail(
     projectPaths: synced.projectPaths,
     sourceInstanceId: synced.sourceInstanceId,
     sourceSessionId: summary.session_id,
+    remoteTranscriptRef: null,
   });
   return { context: synced, result: normalizeDetail(detailRaw) };
 }
@@ -1033,7 +1143,13 @@ function projectLastSegment(path: string): string {
 }
 
 function normalizeMetaPath(path: string): string {
-  return path.replace(/\\/g, "/");
+  let normalized = path.trim().replace(/\\/g, "/");
+  if (normalized.startsWith("//?/UNC/")) {
+    normalized = `//${normalized.slice("//?/UNC/".length)}`;
+  } else if (normalized.startsWith("//?/")) {
+    normalized = normalized.slice("//?/".length);
+  }
+  return normalized;
 }
 
 function snapshotMatchesFilters(
@@ -1266,6 +1382,14 @@ async function writeFavoriteSnapshot(sessionKey: string, detail: HistorySessionD
 async function deleteFavoriteSnapshot(sessionKey: string): Promise<void> {
   const db = await getDb();
   await db.execute("DELETE FROM session_favorite_snapshots WHERE session_key = $1", [sessionKey]);
+}
+
+async function deleteFavoriteSnapshotsForSession(source: HistorySource, sessionId: string): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    "DELETE FROM session_favorite_snapshots WHERE source = $1 AND session_id = $2",
+    [source, sessionId]
+  );
 }
 
 type HistoryEditOp = "edit" | "delete" | "insert" | "restore";
@@ -1544,7 +1668,7 @@ function ensureHistoryIndexListener(): Promise<void> {
     historyIndexReadyRefreshTimer = window.setTimeout(() => {
       historyIndexReadyRefreshTimer = null;
       const state = useHistoryStore.getState();
-      void state.loadSessions().then(() => {
+      void state.loadSessions({ background: true }).then(() => {
         const query = useHistoryStore.getState().globalQuery;
         if ([...query.trim()].length >= MIN_GLOBAL_SEARCH_CHARS) {
           return useHistoryStore.getState().runGlobalSearch(query);
@@ -1564,23 +1688,56 @@ function ensureHistoryIndexListener(): Promise<void> {
 
 const remoteHistorySyncRequests = new Map<string, Promise<SshRemoteHistorySyncResult>>();
 
+interface RemoteHistorySyncOptions {
+  reset?: boolean;
+  limit?: number;
+  forceRefresh?: boolean;
+}
+
 async function requestRemoteHistorySync(
   context: SshAgentHistoryContext,
-  options: { reset?: boolean; limit?: number },
+  options: RemoteHistorySyncOptions,
 ): Promise<SshRemoteHistorySyncResult> {
+  const limit = options.limit ?? SESSION_PAGE_FETCH_LIMIT;
+  const cursor = options.reset ? null : context.cursor || null;
+  const forceRefresh = options.forceRefresh ?? false;
+  const key = JSON.stringify({
+    hostId: context.hostId,
+    source: context.source,
+    configuredConfigRoot: context.configuredConfigRoot,
+    projectPaths: [...context.projectPaths].sort(),
+    sourceInstanceId: context.sourceInstanceId || null,
+    cursor,
+    limit,
+    forceRefresh,
+    scopeKind: context.scopeKind,
+    installationId: context.launch.agentInstallationId,
+    remoteMachineId: context.launch.agentRemoteMachineId,
+    sshUser: context.launch.username,
+  });
+  const existing = remoteHistorySyncRequests.get(key);
+  if (existing) return existing;
+  const requestConsumerId = `history-sync:${crypto.randomUUID()}`;
   const args = {
-    consumerId: context.consumerId,
+    consumerId: requestConsumerId,
     sshLaunch: context.launch,
     source: context.source,
     configuredConfigRoot: context.configuredConfigRoot,
     projectPaths: context.projectPaths,
     sourceInstanceId: context.sourceInstanceId || null,
-    cursor: options.reset ? null : context.cursor || null,
-    limit: options.limit ?? SESSION_PAGE_FETCH_LIMIT,
+    cursor,
+    limit,
+    forceRefresh,
   };
-  const key = JSON.stringify({ ...args, hostId: context.hostId, scopeKind: context.scopeKind });
-  const existing = remoteHistorySyncRequests.get(key);
-  if (existing) return existing;
+  const operationId = `remote-history:${context.consumerId}`;
+  useBackgroundOperationStore.getState().start({
+    id: operationId,
+    kind: "remoteHistory",
+    titleKey: "backgroundOperations.remoteHistory.title",
+    detailKey: "backgroundOperations.remoteHistory.loading",
+    contextLabel: context.projectPaths[0] ?? context.configuredConfigRoot,
+    retry: () => { void syncRemoteHistoryContext(context, options).catch(() => undefined); },
+  });
   const request = invoke<SshRemoteHistorySyncResult>("history_remote_sync", args).then(async (result) => {
     if (result.applied !== false) {
       await useSshAgentIntegrationStore.getState().recordHistorySource(
@@ -1590,18 +1747,26 @@ async function requestRemoteHistorySync(
         context.scopeKind,
       );
     }
+    useBackgroundOperationStore.getState().succeed(operationId);
     return result;
+  }).catch((error) => {
+    useBackgroundOperationStore.getState().fail(operationId, error);
+    throw error;
   });
   remoteHistorySyncRequests.set(key, request);
   void request.finally(() => {
     if (remoteHistorySyncRequests.get(key) === request) remoteHistorySyncRequests.delete(key);
+    void invoke("history_remote_close", {
+      hostId: context.hostId,
+      consumerId: requestConsumerId,
+    }).catch(() => undefined);
   }).catch(() => undefined);
   return request;
 }
 
 async function syncRemoteHistoryContext(
   context: SshAgentHistoryContext,
-  options: { reset?: boolean; limit?: number } = {},
+  options: RemoteHistorySyncOptions = {},
 ): Promise<SshAgentHistoryContext> {
   const result = await requestRemoteHistorySync(context, options);
   if (result.applied === false) return context;
@@ -1734,14 +1899,23 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     globalSearchRequestSeq += 1;
     const isCurrentOpenRequest = () => openRequestSeq === historyOpenRequestSeq;
     const nextSourceFilter = options?.sourceFilter ?? get().sourceFilter;
-    const nextProjectPathFilter = options?.projectPath?.trim() || null;
+    const requestedProjectPath = options?.projectPath?.trim() || null;
+    const requestedProjectId = options?.projectId?.trim() || null;
+    const projectStore = useProjectStore.getState();
+    if (!projectStore.loaded && (requestedProjectId || requestedProjectPath)) {
+      await projectStore.fetchAll("interactive");
+    }
+    const project = findHistoryProject(
+      useProjectStore.getState().projects,
+      requestedProjectId,
+      requestedProjectPath,
+    );
+    const resolvedProjectPath = resolveHistoryProjectPath(project);
+    const nextProjectPathFilter = resolvedProjectPath || requestedProjectPath;
     const nextProjectIdFilter = nextProjectPathFilter
-      ? (options?.projectId?.trim() || null)
+      ? (project?.id ?? requestedProjectId)
       : null;
     const nextScopedProjectPathFilter = options?.scopedProjectPath?.trim() || null;
-    const project = options?.projectId
-      ? useProjectStore.getState().projects.find((item) => item.id === options.projectId)
-      : undefined;
     const nextRemoteContext = project?.environment_type === "ssh"
       ? await buildSshAgentHistoryContext(project)
       : null;
@@ -1777,12 +1951,8 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     });
     try {
       if (nextRemoteContext) {
-        if (nextRemoteContext.sourceInstanceId) {
-          await get().loadSessions();
-          if (!isCurrentOpenRequest()) return;
-        }
-        try {
-          const synced = await syncRemoteHistoryContext(nextRemoteContext);
+        const refreshRemote = async (forceRefresh: boolean) => {
+          const synced = await syncRemoteHistoryContext(nextRemoteContext, { forceRefresh });
           if (!isCurrentOpenRequest()) {
             if (get().remoteContext?.consumerId !== nextRemoteContext.consumerId) {
               void invoke("history_remote_close", {
@@ -1805,8 +1975,9 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
               error: null,
             },
           });
-          await get().loadSessions();
-        } catch (error) {
+          await get().loadSessions({ background: true });
+        };
+        const markRemoteRefreshError = (error: unknown) => {
           if (!isCurrentOpenRequest()) return;
           set((state) => ({
             indexStatus: {
@@ -1817,7 +1988,23 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
               error: String(error),
             },
           }));
-          if (!nextRemoteContext.sourceInstanceId) throw error;
+        };
+        if (nextRemoteContext.sourceInstanceId) {
+          await get().loadSessions();
+          if (!isCurrentOpenRequest()) return;
+          if (get().sessions.length > 0) {
+            void refreshRemote(true).catch(markRemoteRefreshError);
+            return;
+          }
+        }
+        try {
+          await refreshRemote(false);
+          if (get().sessions.length === 0) {
+            await refreshRemote(true);
+          }
+        } catch (error) {
+          markRemoteRefreshError(error);
+          throw error;
         }
         return;
       }
@@ -1883,18 +2070,29 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     }
   },
 
-  loadSessions: async () => {
+  loadSessions: async (options) => {
     const requestSeq = ++sessionListRequestSeq;
     const remoteContext = get().remoteContext;
     const remoteConsumerId = remoteContext?.consumerId ?? null;
     const sourceFilter = get().sourceFilter;
     const projectPath = effectiveProjectPathFilter(get());
+    const background = options?.background === true && get().sessions.length > 0;
+    const sessionLimit = background
+      ? Math.max(SESSION_PAGE_SIZE, get().sessionListOffset)
+      : SESSION_PAGE_SIZE;
+    const fetchLimit = sessionLimit + 1;
     const stopPerf = createPerfMarker("history.sessions.load", {
       sourceFilter: get().sourceFilter,
       projectPathFilter: get().projectPathFilter ?? "__all__",
       scopedProjectPathFilter: get().scopedProjectPathFilter ?? "__none__",
+      mode: background ? "background" : "foreground",
+      limit: sessionLimit,
     });
-    set({ loadingSessions: true, loadingMoreSessions: false, hasMoreSessions: false, sessionListOffset: 0 });
+    if (background) {
+      set({ loadingSessions: false, loadingMoreSessions: false });
+    } else {
+      set({ loadingSessions: true, loadingMoreSessions: false, hasMoreSessions: false, sessionListOffset: 0 });
+    }
     try {
       await get().ensureMetaTable();
       const source = normalizeSourceFilter(sourceFilter);
@@ -1904,7 +2102,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
             sourceInstanceId: remoteContext.sourceInstanceId,
             projectPath,
             query: null,
-            limit: SESSION_PAGE_FETCH_LIMIT,
+            limit: fetchLimit,
             offset: 0,
           })
           : []
@@ -1913,13 +2111,15 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
           ...(await getHistoryPathArgs()),
           projectPath,
           query: null,
-          limit: SESSION_PAGE_FETCH_LIMIT,
+          limit: fetchLimit,
           offset: 0,
         });
       const allSummaries = (summariesRaw ?? []).map((item) => normalizeSummary(item));
-      const summaries = allSummaries.slice(0, SESSION_PAGE_SIZE);
+      const summaries = allSummaries.slice(0, sessionLimit);
       const metaMap = await readMetaMap();
-      const sessions = await applyFavoriteSnapshots(summaries, metaMap, sourceFilter, projectPath);
+      const sessions = remoteContext
+        ? applyMeta(summaries, metaMap)
+        : await applyFavoriteSnapshots(summaries, metaMap, sourceFilter, projectPath);
       if (!isCurrentSessionListRequest(requestSeq, remoteConsumerId)) return;
       const activeSessionKey = get().activeSessionKey;
       const activeExists = activeSessionKey
@@ -1929,7 +2129,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       set({
         sessions,
         metaMap,
-        hasMoreSessions: allSummaries.length > SESSION_PAGE_SIZE,
+        hasMoreSessions: allSummaries.length > sessionLimit,
         sessionListOffset: summaries.length,
         sessionsIndexGeneration: get().indexStatus.generation,
         activeSessionKey: nextActiveKey,
@@ -1980,7 +2180,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
           remoteContext = synced;
           set({ remoteContext: synced });
           if (previousGeneration > 0 && synced.generation !== previousGeneration) {
-            await get().loadSessions();
+            await get().loadSessions({ background: true });
             return;
           }
         } catch (error) {
@@ -2029,7 +2229,9 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
         sourceSessionKeys.add(key);
       }
       const metaMap = get().metaMap;
-      const sessions = await applyFavoriteSnapshots(Array.from(summaryMap.values()), metaMap, sourceFilter, projectPath, sourceSessionKeys);
+      const sessions = remoteContext
+        ? applyMeta(Array.from(summaryMap.values()), metaMap)
+        : await applyFavoriteSnapshots(Array.from(summaryMap.values()), metaMap, sourceFilter, projectPath, sourceSessionKeys);
       if (!isCurrentSessionListRequest(requestSeq, remoteConsumerId)) return;
       set({
         sessions,
@@ -2079,7 +2281,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
   refreshIndex: async () => {
     const remoteContext = get().remoteContext;
     if (remoteContext) {
-      const synced = await syncRemoteHistoryContext(remoteContext, { reset: true });
+      const synced = await syncRemoteHistoryContext(remoteContext, { reset: true, forceRefresh: true });
       set({
         remoteContext: synced,
         indexStatus: {
@@ -2093,7 +2295,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
           error: null,
         },
       });
-      await get().loadSessions();
+      await get().loadSessions({ background: true });
       if ([...get().globalQuery.trim()].length >= MIN_GLOBAL_SEARCH_CHARS) {
         await get().runGlobalSearch(get().globalQuery);
       }
@@ -2109,17 +2311,22 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       historyIndexReadyRefreshTimer = null;
     }
     set({ indexStatus: normalizeIndexStatus(raw) });
-    await get().loadSessions();
+    await get().loadSessions({ background: true });
     const query = get().globalQuery;
     if ([...query.trim()].length >= MIN_GLOBAL_SEARCH_CHARS) {
       await get().runGlobalSearch(query);
     }
   },
 
-  addConvertedSession: (summary) => {
+  addConvertedSession: (summary, detail) => {
     const normalized = normalizeSummary(summary);
+    const normalizedDetail = normalizeDetail(detail);
+    if (!sameHistorySessionIdentity(normalized, normalizedDetail)) {
+      throw new Error("history_conversion_detail_mismatch");
+    }
     const sessionKey = summarySessionKey(normalized);
     const nextView = toView(normalized, get().metaMap[sessionKey]);
+    sessionDetailRequestSeq += 1;
     set((state) => ({
       sessions: sortSessionViews([
         nextView,
@@ -2130,6 +2337,8 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
           ? "all"
           : state.sourceFilter,
       activeSessionKey: sessionKey,
+      activeSession: normalizedDetail,
+      loadingSessionDetail: false,
       focusedMessageIndex: null,
     }));
     return sessionKey;
@@ -2143,7 +2352,12 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       stopPerf({ skipped: true, reason: "missing-target" });
       return;
     }
-    set({ activeSessionKey: sessionKey, loadingSessionDetail: true, focusedMessageIndex: null });
+    set({
+      activeSessionKey: sessionKey,
+      activeSession: null,
+      loadingSessionDetail: true,
+      focusedMessageIndex: null,
+    });
     try {
       try {
         const remoteContext = get().remoteContext;
@@ -2157,6 +2371,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
               projectPaths: remoteContext.projectPaths,
               sourceInstanceId: target.session_ref.sourceInstanceId,
               sourceSessionId: target.session_ref.sourceSessionId,
+              remoteTranscriptRef: null,
             })
             : await Promise.reject(new Error("history_remote_online_required"))
           : await invoke<unknown>("history_get_session", {
@@ -2166,11 +2381,15 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
             projectKey: target.project_key,
           });
         const detail = normalizeDetail(detailRaw);
+        if (!sameHistorySessionIdentity(target, detail)) {
+          throw new Error("history_session_identity_mismatch");
+        }
         if (requestSeq === sessionDetailRequestSeq) set({ activeSession: detail });
       } catch (err) {
         const snapshot = await readFavoriteSnapshotDetail(sessionKey);
         if (!snapshot) throw err;
         logWarn("history.favoriteSnapshot.fallback", { sessionKey, error: String(err) });
+        if (!sameHistorySessionIdentity(target, snapshot)) throw err;
         if (requestSeq === sessionDetailRequestSeq) set({ activeSession: snapshot });
       }
     } finally {
@@ -2185,7 +2404,12 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     const requestSeq = ++sessionDetailRequestSeq;
     const sessionKey = hitSessionKey(hit);
     const stopPerf = createPerfMarker("history.session.detail", { sessionKey, fromSearch: true });
-    set({ activeSessionKey: sessionKey, loadingSessionDetail: true, focusedMessageIndex: null });
+    set({
+      activeSessionKey: sessionKey,
+      activeSession: null,
+      loadingSessionDetail: true,
+      focusedMessageIndex: null,
+    });
     try {
       const remoteContext = get().remoteContext;
       const detailRaw = hit.session_ref?.transportKind === "ssh"
@@ -2198,6 +2422,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
             projectPaths: remoteContext.projectPaths,
             sourceInstanceId: hit.session_ref.sourceInstanceId,
             sourceSessionId: hit.session_ref.sourceSessionId,
+            remoteTranscriptRef: null,
           })
           : await Promise.reject(new Error("history_remote_online_required"))
         : await invoke<unknown>("history_get_session", {
@@ -2207,6 +2432,9 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
           projectKey: hit.project_key,
         });
       const detail = normalizeDetail(detailRaw);
+      if (!sameHistorySessionIdentity(hit, detail)) {
+        throw new Error("history_session_identity_mismatch");
+      }
       const exists = get().sessions.some((item) => item.sessionKey === sessionKey);
       if (exists) {
         if (requestSeq !== sessionDetailRequestSeq) return;
@@ -2253,6 +2481,8 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       throw new Error("history_remote_read_only");
     }
 
+    // 后端删除会话时会连带删除其 subagents/ 子转录，本地状态需同步移除对应子行。
+    const removedSessionKeys = new Set([sessionKey]);
     if (!target.favoriteSnapshot) {
       await invoke("history_delete_session", {
         filePath: target.file_path,
@@ -2260,23 +2490,35 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
         source: target.source,
         projectKey: target.project_key,
       });
+      for (const item of get().sessions) {
+        if (
+          item.source === target.source &&
+          item.project_key === target.project_key &&
+          inferSubagentParentSessionId(item) === target.session_id
+        ) {
+          removedSessionKeys.add(item.sessionKey);
+        }
+      }
     }
 
     const db = await getDb();
-    await db.execute("DELETE FROM session_meta WHERE session_key = $1", [sessionKey]);
-    await deleteFavoriteSnapshot(sessionKey);
+    for (const key of removedSessionKeys) {
+      await db.execute("DELETE FROM session_meta WHERE session_key = $1", [key]);
+      await deleteFavoriteSnapshot(key);
+    }
 
-    const sessions = get().sessions.filter((item) => item.sessionKey !== sessionKey);
+    const sessions = get().sessions.filter((item) => !removedSessionKeys.has(item.sessionKey));
     const metaMap = { ...get().metaMap };
-    delete metaMap[sessionKey];
-    const activeWasDeleted = get().activeSessionKey === sessionKey;
-    const nextActiveKey = activeWasDeleted ? sessions[0]?.sessionKey ?? null : get().activeSessionKey;
+    for (const key of removedSessionKeys) delete metaMap[key];
+    const currentActiveKey = get().activeSessionKey;
+    const activeWasDeleted = currentActiveKey !== null && removedSessionKeys.has(currentActiveKey);
+    const nextActiveKey = activeWasDeleted ? sessions[0]?.sessionKey ?? null : currentActiveKey;
     set({
       sessions,
       metaMap,
       activeSessionKey: nextActiveKey,
       activeSession: activeWasDeleted ? null : get().activeSession,
-      searchHits: get().searchHits.filter((hit) => hitSessionKey(hit) !== sessionKey),
+      searchHits: get().searchHits.filter((hit) => !removedSessionKeys.has(hitSessionKey(hit))),
       focusedMessageIndex: null,
     });
     if (nextActiveKey && activeWasDeleted) {
@@ -2605,6 +2847,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
 
     const db = await getDb();
     if (snapshotDetail) {
+      await deleteFavoriteSnapshotsForSession(session.source, session.session_id);
       await writeFavoriteSnapshot(sessionKey, snapshotDetail);
     }
     await db.execute(
@@ -2630,7 +2873,11 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       ]
     );
     if (patch.starred === false) {
-      await deleteFavoriteSnapshot(sessionKey);
+      await db.execute(
+        "UPDATE session_meta SET starred = 0, updated_at = $3 WHERE source = $1 AND session_id = $2",
+        [session.source, session.session_id, updatedAt]
+      );
+      await deleteFavoriteSnapshotsForSession(session.source, session.session_id);
     }
 
     const nextMeta: SessionMeta = {
@@ -2645,7 +2892,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       updated_at: updatedAt,
     };
 
-    const nextMetaMap = { ...get().metaMap, [sessionKey]: nextMeta };
+    const nextMetaMap = patch.starred === false ? await readMetaMap() : { ...get().metaMap, [sessionKey]: nextMeta };
     const sourceSessionKeys = new Set<string>();
     const visibleSessions = get().sessions.filter((item) => !(patch.starred === false && item.sessionKey === sessionKey && item.favoriteSnapshot));
     const summaries: HistorySessionSummary[] = visibleSessions.map((item) => {

@@ -12,8 +12,11 @@
 ### 2. Signatures
 
 - 持久化：`sessionStore.saveSessions(sessions)` 写当前运行环境会话文件的 `sessions` key（安装版 `~/.cli-manager/sessions.json`，`tauri dev` 为 `~/.cli-manager/sessions.dev.json`；整对象落盘，仅按 `kind` 过滤伪会话，**不删字段**）。
-- 恢复开关：`settingsStore.terminalSessionRestoreEnabled: boolean`，默认 `true`。
-- 恢复入口：`terminalStore.restoreSessions(projectMap, projectHealth)`（由 `App.tsx` 启动问询弹窗 confirm 后调用；**非 dead code**，务必保持接线）。
+- 恢复开关：`settingsStore.terminalSessionRestoreEnabled: boolean`（总开关，默认 `true`）。
+- 恢复方式：`settingsStore.terminalSessionRestoreMode: "ask" | "auto"`，默认 `"ask"`。`ask` = 启动弹窗询问；`auto` = 启动静默直接恢复。二者均只在应用启动时刻触发一次（见守护变量约定）。
+- 恢复入口：`terminalStore.restoreSessions(projectMap, projectHealth)`（由 `App.tsx` init 直接调用（`auto`）或启动问询弹窗 confirm 后调用（`ask`）；**非 dead code**，务必保持接线）。
+- 每进程一次守护：`App.tsx` 模块级 `sessionRestoreHandled` 变量保证恢复提示/自动恢复只在 `init()` 里触发一次。切换设置页等后续操作禁止再次弹窗——这是历史上功能被移除的根因（提示曾反复弹）。
+- 恢复确认交互：共享 `ConfirmDialog` 提供默认关闭的 `confirmAutoFocus?: boolean` 与 `contentClassName?: string`；恢复弹窗单独启用确认按钮聚焦与响应式专用宽度。
 - 节流落盘：`sessionSnapshotPersistence.ts` — `registerTerminalSnapshotSource(sessionId, serialize)` / `markTerminalSnapshotDirty(id)` / `flushTerminalSnapshotsNow()`。
 - 分流判定：`detectCliResumeKind(startupCmd, project) -> "codex" | "claude" | null`。
 - resume 拼接：`buildCliResumeStartupCommand(kind, cliSessionId, project)`，复用 `appendResumeCliArgs`（`projectStartupCommand.ts`）。
@@ -29,7 +32,11 @@
 - resume 命令必须经 `prepareStartupCommandForPty` + `formatStartupInputForPty` 包装，禁止裸写。
 - `appendResumeCliArgs` 在继承项目普通 CLI 参数前必须移除 `cli_args` 中已有的 `resume <id>`、`resume --no-alt-screen <id>`、`--resume <id>`、`--continue` 等会话选择片段；新命令中的目标 Session ID 只能出现一次，Provider 参数仍须保留并去重。
 - 持续保存：定时节流 10s(`SNAPSHOT_THROTTLE_MS`)，脏检测跳过无新输出的终端，单终端尾部限行 `SNAPSHOT_MAX_LINES=2000`，仅有真实 PTY 会话时启动定时器。正常退出且明确丢弃会话时，`flushTerminalSnapshotsNow()` 必须在 `TerminalProcessManager.closeAll()` 之前强制落盘最终画面。
-- 启动问询：有可恢复真实 PTY 会话 → 弹窗询问；无 → 静默进入不弹窗。拒绝 → `sessionStore.clear()` 只清工作区快照，**不碰 SQLite `session_meta`**。
+- 启动问询（`mode=ask`）：有可恢复真实 PTY 会话 → 弹窗询问；无 → 静默进入不弹窗。拒绝 → `sessionStore.clear()` 只清工作区快照，**不碰 SQLite `session_meta`**，并 `TerminalProcessManager.closeAll()` 关闭无人认领的 daemon 会话。
+- 自动恢复（`mode=auto`）：有可恢复真实 PTY 会话 → 不弹窗，`init()` 直接调用 `restoreSessions`；无 → 静默进入。daemon 会话仍走 `restoreSessions` 内部 attach 优先，与后台续跑不冲突。
+- **★每进程只触发一次**：`App.tsx` 模块级 `sessionRestoreHandled` 守护——恢复弹窗/自动恢复只在 `init()` 里触发一次并立即置位。切换设置页等任何后续渲染都不得重新触发（历史教训：`735123d2` 拆功能的根因就是提示不受控、切设置页反复弹）。
+- 恢复确认弹窗必须使用简洁单句提示和该调用点专用的响应式宽度：常规桌面宽度目标为提示语单行，窄窗口保留左右安全间距并自然收缩，禁止横向溢出。
+- 恢复确认弹窗打开时必须默认聚焦“恢复”按钮，使 Enter 直接确认；该行为通过 Radix `onOpenAutoFocus` + confirm button ref 显式完成，禁止 DOM 查询或按按钮文案查找。共享 `ConfirmDialog` 的可选 props 默认关闭，其他调用点的焦点、宽度和行为不得改变。
 - 环境隔离：Tauri `cfg(dev)` 必须选择 `sessions.dev.json`；安装包继续使用 `sessions.json`。开发版不得读取、迁移或清理安装版会话快照。
 - 开关关闭：启动时必须清理当前环境快照，不得显示恢复弹窗或调用 `terminalStore.restoreSessions`。重新开启后只恢复此后新保存的快照。
 - daemon 会话优先：启动恢复先调用 `pty_daemon_sessions`。daemon 中仍存在的 session 保留原 session id/startup metadata，标记为待 attach；`XTermTerminal` 必须先订阅输出，再通过 `TerminalProcessManager.attach` 应用尺寸化 replay，禁止重跑 `startupCmd`。
@@ -42,8 +49,13 @@
 - CLI 会话 + 有合法 cliSessionId(trim 后非空) → resume `<id>`；否则 → `--last`/`--continue`。
 - 项目不存在 / 路径无效 → 跳过或 toast 警告，不 crash。
 - 快照序列化单个失败 → 标回脏下轮重试，不拖垮整轮落盘。
-- 无可恢复会话 → 不弹窗、不空转定时器。
+- 无可恢复会话 → 不弹窗、不调用 `restoreSessions`、不空转定时器。
 - `terminalSessionRestoreEnabled=false` → 清理当前环境快照，不弹窗，不影响另一运行环境的 sessions 文件。
+- `terminalSessionRestoreMode=ask` + 有可恢复会话 → 每进程仅打开一次确认弹窗；确认后调用一次 `restoreSessions`。
+- 恢复确认弹窗打开 → “恢复”按钮获得焦点；直接按 Enter 触发确认。未启用 `confirmAutoFocus` 的其他 `ConfirmDialog` 调用点继续沿用 Radix 默认焦点行为。
+- 常规桌面宽度 → 恢复提示语单行；窄窗口 → 弹窗宽度不超过视口减安全间距，无横向溢出。
+- `terminalSessionRestoreMode=auto` + 有可恢复会话 → 每进程仅调用一次 `restoreSessions`，不打开确认弹窗。
+- 持久化恢复方式缺失或不是 `ask` / `auto` → 加载时回退默认值 `ask`。
 
 ### 5. Good/Base/Bad Cases
 
@@ -59,8 +71,10 @@
 - `npx tsc --noEmit`（前端唯一静态校验）。
 - `node scripts/resumeCliArgs.test.mjs`（恢复参数去重、普通参数保留、Provider 参数单次追加）。
 - Rust：会话文件名选择测试必须断言安装环境为 `sessions.json`、开发环境为 `sessions.dev.json`。
-- 手动：codex/claude 会话关闭重开走 resume、历史不被清屏覆盖、可继续；shell 会话贴回历史；无会话不弹窗；拒绝后再启动不再询问同批旧标签且 `session_meta` 不受影响；强杀后恢复到 ≤10s 前快照。
-- 手动：分别运行安装版与 `tauri dev`，确认两边的恢复提示和清理操作互不影响；关闭恢复开关后重启确认不再提示。
+- 手动：`ask` 模式仅在启动时弹一次；确认后恢复，拒绝后再启动不再询问同批旧标签且 `session_meta` 不受影响；切换设置页不重复弹窗。
+- 手动：恢复弹窗在常规桌面宽度下提示语单行，缩窄窗口后自然收缩且无横向溢出；打开时焦点落在“恢复”，直接按 Enter 执行恢复；抽查其他确认弹窗保持原默认焦点和宽度。
+- 手动：`auto` 模式启动不弹窗并直接恢复；codex/claude 会话走 resume、历史不被清屏覆盖且可继续；shell 会话贴回历史；强杀后恢复到 ≤10s 前快照。
+- 手动：无会话不弹窗；分别运行安装版与 `tauri dev`，确认两边的恢复提示和清理操作互不影响；关闭恢复开关后重启确认不再提示，常规设置页的恢复方式选择器置灰。
 
 ### 7. Wrong vs Correct
 

@@ -10,6 +10,9 @@ import { useWorktreeStore } from "../stores/worktreeStore";
 import { useExternalSessionSyncStore } from "../stores/externalSessionSyncStore";
 import { useI18n } from "../lib/i18n";
 import { getHistoryPathArgs } from "../lib/historyPathArgs";
+import { inferSubagentParentSessionId } from "../lib/historySubagents";
+import { findLocalHistoryCwdProjects } from "../lib/historyResumeProject";
+import { sameHistorySessionIdentity } from "../lib/historySessionIdentity";
 import {
   HISTORY_SOURCE_DESCRIPTOR_BY_ID,
   type HistorySourceId,
@@ -97,17 +100,16 @@ function parseProjectEnvVars(project?: Project | null): Record<string, string> |
 }
 
 function matchesHistorySource(project: Project, source: string): boolean {
+  if (source === "grok") {
+    return project.cli_tool.trim().toLowerCase().includes("grok");
+  }
   return getProviderSwitchAppType(project) === source;
 }
 
 function findHistoryProjects(session: HistorySessionView | HistorySessionDetail, projects: Project[]): Project[] {
   const sourceProjects = projects.filter((project) => matchesHistorySource(project, session.source));
-  const cwd = "cwd" in session ? session.cwd?.trim() : null;
-  if (cwd) {
-    const normalizedCwd = normalizePathKey(cwd);
-    const cwdProjects = sourceProjects.filter((project) => normalizePathKey(project.path) === normalizedCwd);
-    if (cwdProjects.length > 0) return cwdProjects;
-  }
+  const cwdProjects = findLocalHistoryCwdProjects(session, sourceProjects);
+  if (cwdProjects.length > 0) return cwdProjects;
 
   const normalizedProjectKey = normalizePathKey(session.project_key);
   if (!normalizedProjectKey) return [];
@@ -146,6 +148,7 @@ function resolveResumeCommand(session: HistorySessionView | HistorySessionDetail
   if (!sessionId || /\s/.test(sessionId) || /[\r\n]/.test(sessionId)) return null;
   if (session.source === "claude") return appendResumeCliArgs(`claude --resume ${sessionId}`, "claude", project);
   if (session.source === "codex") return appendResumeCliArgs(`codex resume ${sessionId}`, "codex", project);
+  if (session.source === "grok") return appendResumeCliArgs(`grok --resume ${sessionId}`, "grok", project);
   return null;
 }
 
@@ -200,6 +203,7 @@ interface HistoryConversionResult {
   messageCount: number;
   resumeCommand: string;
   summary: unknown;
+  detail: unknown;
 }
 
 function conversionTargetForSource(source: string): HistoryTargetSource | null {
@@ -218,10 +222,6 @@ function historySourceLabel(source: string): string {
   return HISTORY_SOURCE_DESCRIPTOR_BY_ID.get(source.trim().toLowerCase() as HistorySourceId)?.defaultLabel ?? source;
 }
 
-function makeConvertedSessionKey(result: HistoryConversionResult): string {
-  return `${result.targetSource}:${result.sessionId}:${result.filePath}`;
-}
-
 export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
   const { language, t } = useI18n();
   const { confirm, confirmDialog } = useAppConfirm();
@@ -236,7 +236,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
   const sessions = useHistoryStore((s) => s.sessions);
   const metaMap = useHistoryStore((s) => s.metaMap);
   const activeSessionKey = useHistoryStore((s) => s.activeSessionKey);
-  const activeSession = useHistoryStore((s) => s.activeSession);
+  const storedActiveSession = useHistoryStore((s) => s.activeSession);
   const globalQuery = useHistoryStore((s) => s.globalQuery);
   const sessionQuery = useHistoryStore((s) => s.sessionQuery);
   const searchHits = useHistoryStore((s) => s.searchHits);
@@ -356,6 +356,12 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
   const activeView = useMemo(
     () => sessions.find((item) => item.sessionKey === activeSessionKey) ?? null,
     [sessions, activeSessionKey]
+  );
+  const activeSession = useMemo(
+    () => activeView && storedActiveSession && sameHistorySessionIdentity(activeView, storedActiveSession)
+      ? storedActiveSession
+      : null,
+    [activeView, storedActiveSession]
   );
 
   const tagSuggestions = useMemo(() => {
@@ -503,7 +509,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
 
   useEffect(() => {
     setVisibleSessionCount(SESSION_PAGE_SIZE);
-  }, [favoriteOnly, normalizedGlobal, projectPathFilter, scopedProjectPathFilter, sourceFilter, loadingSessions]);
+  }, [favoriteOnly, normalizedGlobal, projectPathFilter, scopedProjectPathFilter, sourceFilter]);
 
   const visibleFilteredSessions = useMemo(
     () => filteredSessions.slice(0, visibleSessionCount),
@@ -592,11 +598,13 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
   const handleRefreshSessions = useCallback(() => {
     void (async () => {
       await refreshIndex();
-      await useExternalSessionSyncStore.getState().openManualDialog();
+      if (!remoteContext) {
+        await useExternalSessionSyncStore.getState().openManualDialog();
+      }
     })().catch((err) => {
       toast.error(t("history.toast.refreshFailed"), { description: String(err) });
     });
-  }, [refreshIndex, t]);
+  }, [refreshIndex, remoteContext, t]);
 
   const matchIndices = useMemo(() => {
     const query = debouncedSessionQuery.trim();
@@ -847,7 +855,8 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
     session: HistorySessionView | HistorySessionDetail,
     title: string,
     project: Project | null,
-    worktree: WorktreeRecord | null
+    worktree: WorktreeRecord | null,
+    unscopedShell?: string
   ) => {
     const isRemote = session.session_ref?.transportKind === "ssh";
     if (isRemote) {
@@ -936,7 +945,8 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
     }
 
     try {
-      const shell = launchProject?.shell && launchProject.shell !== "powershell" ? launchProject.shell : undefined;
+      const requestedShell = launchProject ? launchProject.shell : unscopedShell;
+      const shell = requestedShell && requestedShell !== "powershell" ? requestedShell : undefined;
       await createSession(
         project?.id,
         cwd,
@@ -986,11 +996,16 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
     const worktree = findHistoryWorktree(session, worktrees);
     const worktreeProject = findProjectForWorktree(worktree, historyProjects);
     const matchedProjects = findHistoryProjects(session, historyProjects);
+    const cwdProjects = findLocalHistoryCwdProjects(session, historyProjects);
     const candidates = worktreeProject && matchesHistorySource(worktreeProject, session.source)
       ? [worktreeProject]
       : matchedProjects;
 
     if (candidates.length === 0) {
+      if (cwdProjects.length === 1) {
+        void resumeSession(session, title, null, null, cwdProjects[0].shell);
+        return;
+      }
       setResumeIntent({ session, title, worktree: null, projects, allowNewWindow: true, remote: false });
       return;
     }
@@ -1002,12 +1017,12 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
   }, [historyProjects, projects, remoteContext, resumeSession, t, worktrees]);
 
   const resumeConversation = useCallback(() => {
-    if (!activeSession) {
+    if (!activeSession || !activeView) {
       toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.detailLoading") });
       return;
     }
-    requestResume(activeSession, activeView?.displayTitle ?? activeSession.title);
-  }, [activeSession, activeView?.displayTitle, requestResume, t]);
+    requestResume(activeSession, activeView.displayTitle ?? activeSession.title);
+  }, [activeSession, activeView, requestResume, t]);
 
   const openByHit = async (hit: HistorySearchHit) => {
     try {
@@ -1098,10 +1113,16 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
 
   const handleRequestBulkDelete = useCallback(() => {
     if (selectedSessionKeys.size === 0) return;
-    const sessionKeys = filteredSessions.filter((item) => selectedSessionKeys.has(item.sessionKey)).map((item) => item.sessionKey);
-    if (sessionKeys.length === 0) return;
+    const selectedItems = filteredSessions.filter((item) => selectedSessionKeys.has(item.sessionKey));
+    if (selectedItems.length === 0) return;
+    // subagent 子会话由后端随父会话连带删除，禁止单独删除，不进入批量删除队列。
+    const sessionKeys = selectedItems.filter((item) => inferSubagentParentSessionId(item) === null).map((item) => item.sessionKey);
+    if (sessionKeys.length === 0) {
+      toast.info(t("history.toast.bulkDeleteSubagentOnly"));
+      return;
+    }
     setDeleteIntent({ type: "bulk", sessionKeys });
-  }, [filteredSessions, selectedSessionKeys]);
+  }, [filteredSessions, selectedSessionKeys, t]);
 
   const deleteDialogTitle = deleteIntent?.type === "bulk" ? t("history.bulk.confirmDeleteTitle", { count: deleteIntent.sessionKeys.length }) : t("history.deleteSession");
   const deleteDialogMessage = deleteIntent
@@ -1148,8 +1169,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
           ...(await getHistoryPathArgs()),
         });
 
-        const sessionKey = addConvertedSession(result.summary);
-        await openSession(sessionKey || makeConvertedSessionKey(result));
+        addConvertedSession(result.summary, result.detail);
         toast.success(t("history.toast.convertSuccess", {
           source: historySourceLabel(session.source),
           target: historySourceLabel(result.targetSource),
@@ -1160,7 +1180,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
         toast.error(t("history.toast.convertFailed"), { description: String(err) });
       }
     },
-    [addConvertedSession, confirm, openSession, t]
+    [addConvertedSession, confirm, t]
   );
 
   const jumpToMessage = async (messageIndex: number) => {

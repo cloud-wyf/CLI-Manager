@@ -26,7 +26,11 @@ import { ExitProgressOverlay, type ExitPhase } from "./components/ExitProgressOv
 import { AppFailureState } from "./components/AppFailureState";
 import { ExternalSessionSyncDialog } from "./components/ExternalSessionSyncDialog";
 import { CircleAlert, CircleCheck, Info, ShieldAlert, X } from "./components/icons";
-import { useSettingsStore, type HookEventType } from "./stores/settingsStore";
+import {
+  useSettingsStore,
+  type ExitWithRunningTasksBehavior,
+  type HookEventType,
+} from "./stores/settingsStore";
 import { useProjectStore } from "./stores/projectStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { flushTerminalSnapshotsNow } from "./lib/sessionSnapshotPersistence";
@@ -66,12 +70,16 @@ const appStartAt =
 let firstScreenPerfReported = false;
 let firstScreenShown = false;
 let startupBaseReady = false;
-// React StrictMode/初始化重入下，每个应用进程最多展示一次恢复提示。
 let deferredStartupTasksStarted = false;
+// React StrictMode/初始化重入下，每个应用进程最多处理一次会话恢复（弹窗或自动）。
+// 该守护确保恢复提示只在启动时刻触发一次，切设置页/切视图重渲染都不会再弹。
+let sessionRestoreHandled = false;
 let startupUpdateChecked = false;
 let settingsModalPreloadStarted = false;
 const COMPACT_WINDOW_WIDTH = 350;
 const WINDOW_MIN_HEIGHT = 600;
+const CLAUDE_QUESTION_TOOL_NAME = "AskUserQuestion";
+const CODEX_QUESTION_TOOL_NAME = "request_user_input";
 interface DaemonSessionMeta {
   sessionId: string;
   alive: boolean;
@@ -131,6 +139,7 @@ interface HookSettingsStatusPayload {
   claude: { status: HookInstallStatus };
   codex: { status: HookInstallStatus };
   pi: { status: HookInstallStatus };
+  grok: { status: HookInstallStatus };
   claudeAutoRepaired?: boolean;
 }
 
@@ -150,6 +159,7 @@ async function hasInstalledCliHook(): Promise<boolean> {
     selectedDir: settings.claudeHookConfigDir?.trim() || null,
     codexSelectedDir: settings.codexHookConfigDir?.trim() || null,
     piSelectedDir: settings.piHookConfigDir?.trim() || null,
+    grokSelectedDir: settings.grokHookConfigDir?.trim() || null,
     ccSwitchDbPath: settings.ccSwitchDbPath ?? undefined,
     autoRepair: settings.claudeHookBridgeEnabled && settings.claudeHookAutoRepairKnownInstalled,
   });
@@ -162,7 +172,8 @@ async function hasInstalledCliHook(): Promise<boolean> {
   return (
     (settings.claudeHookBridgeEnabled && status.claude.status === "installed") ||
     (settings.codexHookBridgeEnabled && status.codex.status === "installed") ||
-    (settings.piHookBridgeEnabled && status.pi.status === "installed")
+    (settings.piHookBridgeEnabled && status.pi.status === "installed") ||
+    (settings.grokHookBridgeEnabled && status.grok.status === "installed")
   );
 }
 
@@ -193,7 +204,23 @@ function createClaudeHookToastId(tabId: string): string {
   return `${CLAUDE_HOOK_TOAST_PREFIX}-${tabId}-${claudeHookToastSequence}`;
 }
 
+function isQuestionRequestNotification(payload: CliHookPayload): boolean {
+  return (
+    payload.event === "Notification" &&
+    ((payload.source === "claude" && payload.toolName === CLAUDE_QUESTION_TOOL_NAME) ||
+      (payload.source === "codex" && payload.toolName === CODEX_QUESTION_TOOL_NAME))
+  );
+}
+
 function getClaudeHookToastStyle(payload: CliHookPayload): ClaudeHookToastStyle {
+  if (isQuestionRequestNotification(payload)) {
+    return {
+      variant: "attention",
+      icon: Info,
+      eyebrow: translateCurrent("notifications.hookToast.question"),
+      actionLabel: translateCurrent("notifications.hookToast.answer"),
+    };
+  }
   if (payload.event === "Stop") {
     return { variant: "finished", icon: CircleCheck, eyebrow: translateCurrent("notifications.hookToast.finished"), actionLabel: translateCurrent("notifications.hookToast.view") };
   }
@@ -209,12 +236,16 @@ function getClaudeHookToastStyle(payload: CliHookPayload): ClaudeHookToastStyle 
 function getCliHookSourceName(payload: CliHookPayload): string {
   if (payload.source === "codex") return "Codex CLI";
   if (payload.source === "pi") return "Pi Agent";
+  if (payload.source === "grok") return "Grok Build";
   return "Claude Code";
 }
 
 function getClaudeHookToastTitle(payload: CliHookPayload, tabTitle: string): string {
-  if (payload.title) return payload.title;
   const sourceName = getCliHookSourceName(payload);
+  if (isQuestionRequestNotification(payload)) {
+    return translateCurrent("notifications.hookToast.title.question", { sourceName });
+  }
+  if (payload.title) return payload.title;
   if (payload.event === "Stop") return translateCurrent("notifications.hookToast.title.finished", { tabTitle });
   if (payload.event === "StopFailure") return translateCurrent("notifications.hookToast.title.failed", { tabTitle });
   if (payload.event === "PermissionRequest") return translateCurrent("notifications.hookToast.title.approval", { sourceName });
@@ -255,6 +286,10 @@ function getSystemNotificationBody(payload: CliHookPayload, projectName: string)
   const sourceName = getCliHookSourceName(payload);
   const detail = payload.message?.trim();
   const suffix = detail ? `: ${truncateSystemNotificationDetail(detail)}` : "";
+
+  if (isQuestionRequestNotification(payload)) {
+    return translateCurrent("notifications.system.question", { sourceName, projectName, suffix });
+  }
 
   switch (payload.event) {
     case "Stop":
@@ -772,10 +807,15 @@ function App() {
         }
         return;
       }
-      const tabId = useTerminalStore.getState().handleCliHookEvent(event.payload);
-      handleWebDeviceCliHook(event.payload, tabId);
+      const boundTabId = useTerminalStore.getState().handleCliHookEvent(event.payload);
+      handleWebDeviceCliHook(event.payload, boundTabId);
+      // External hooks (no PTY tab env) still carry a synthetic tabId like external:grok:<session>.
+      // Prefer bound session when present; otherwise fall back so toast/system notifications still fire.
+      const tabId = boundTabId ?? event.payload.tabId?.trim() ?? null;
       const terminalStore = useTerminalStore.getState();
-      const tabTitle = tabId ? terminalStore.sessions.find((session) => session.id === tabId)?.title ?? null : null;
+      const tabTitle = boundTabId
+        ? terminalStore.sessions.find((session) => session.id === boundTabId)?.title ?? null
+        : null;
       // SessionStart/UserPromptSubmit 只更新状态；普通工具生命周期事件不打扰用户。
       if (
         tabId &&
@@ -902,11 +942,16 @@ function App() {
         await useWorktreeStore.getState().markMissingWorktrees();
       });
 
-      // 3. 恢复功能关闭时清理当前环境快照；开启时检测遗留标签并询问是否恢复。
-      //    注意：此处不再无条件 clear()。原 clear 的初衷是"防止重建 PTY 并重跑 startupCmd"，
-      //    但 Issue #123 的需求方已明确接受"恢复时重跑 startupCmd 换取无缝手感"这一取舍，故改为问询式恢复。
+      // 3. 恢复功能关闭时清理当前环境快照；开启时检测遗留标签，按恢复方式分流：
+      //    - ask：启动时弹窗询问是否恢复（默认）
+      //    - auto：静默直接恢复，不打扰
+      //    注意：此处不再无条件 clear()。恢复执行器会优先 attach 仍存活的 daemon 会话，
+      //    其余会话再按 CLI resume / Shell scrollback + 重建 PTY 分流处理。
+      //    sessionRestoreHandled 守护保证恢复只在启动时刻触发一次——这是当年拆功能的根因
+      //    （提示曾在切设置页时反复弹），务必保留。
       const persistedSessions = useSessionStore.getState().sessions;
-      const terminalSessionRestoreEnabled = useSettingsStore.getState().terminalSessionRestoreEnabled;
+      const { terminalSessionRestoreEnabled, terminalSessionRestoreMode } =
+        useSettingsStore.getState();
       const hasRestorable = persistedSessions.some(
         (session) => (session.kind ?? "pty") === "pty"
       );
@@ -918,6 +963,23 @@ function App() {
         await useSessionStore.getState().clear().catch((err) => {
           logWarn("Failed to clear restored sessions during startup", err);
         });
+      } else if (!sessionRestoreHandled && !cancelled) {
+        sessionRestoreHandled = true;
+        if (terminalSessionRestoreMode === "auto") {
+          const { projects, projectHealth } = useProjectStore.getState();
+          const projectMap = new Map(projects.map((project) => [project.id, project]));
+          void useTerminalStore
+            .getState()
+            .restoreSessions(projectMap, projectHealth)
+            .catch((err) => {
+              logWarn("Failed to auto-restore terminal sessions", err);
+              toast.error(startupTranslateRef.current("notifications.app.initFailed"), {
+                description: String(err),
+              });
+            });
+        } else {
+          setRestorePromptOpen(true);
+        }
       }
 
       startupBaseReady = true;
@@ -946,11 +1008,20 @@ function App() {
     };
   }, [loadSettings]);
 
+  // 用户确认恢复上次会话：重建全部标签并 attach 或重建 PTY；CLI 走原生 resume，普通 shell 贴回历史画面。
   const handleConfirmRestoreSessions = useCallback(() => {
     setRestorePromptOpen(false);
-  }, []);
+    const { projects, projectHealth } = useProjectStore.getState();
+    const projectMap = new Map(projects.map((project) => [project.id, project]));
+    void useTerminalStore
+      .getState()
+      .restoreSessions(projectMap, projectHealth)
+      .catch((err) => {
+        logWarn("Failed to restore terminal sessions", err);
+        toast.error(t("notifications.app.initFailed"), { description: String(err) });
+      });
+  }, [t]);
 
-  // 用户确认恢复上次会话：重建全部标签 + attach 新 PTY，按会话类型分流（CLI 会话走原生 resume，普通 shell 贴回历史画面）。
   // 用户拒绝恢复：清除本次工作区恢复快照（不动 session_meta / 历史记录），避免下次继续询问同一批旧标签。
   const handleRejectRestoreSessions = useCallback(() => {
     setRestorePromptOpen(false);
@@ -1313,8 +1384,12 @@ function App() {
   // 所有"退出应用"入口（closeBehavior=exit、关闭弹窗选退出、托盘退出）必须经此守卫：
   // 无运行中任务且 daemon 查询成功 → 清理全部空闲 PTY 后退出；有任务 → 按设置分流。
   // daemon 查询失败 → 仅关闭前台 PTY，不能以“未知”等同“无后台任务”。
-  const requestExitGuardedByRunningTasks = useCallback(async (source: string) => {
-    const { runningIds, daemonSessionsChecked } = await getExitRunningTaskIds(source);
+  const requestExitGuardedByRunningTasks = useCallback(async (
+    source: string,
+    prechecked?: { runningIds: string[]; daemonSessionsChecked: boolean },
+  ) => {
+    const { runningIds, daemonSessionsChecked } =
+      prechecked ?? await getExitRunningTaskIds(source);
     logInfo("exit: guarded request evaluated", {
       source,
       runningCount: runningIds.length,
@@ -1350,47 +1425,53 @@ function App() {
     setRunningTasksDialogOpen(true);
   }, [enterBackgroundTaskMode, getExitRunningTaskIds, minimizeToTray, runExitCleanup]);
 
-  const handleRunningTasksDialogBackground = useCallback((remember: boolean) => {
+  const persistExitTaskBehaviorBeforeAction = useCallback(async (
+    remember: boolean,
+    behavior: Exclude<ExitWithRunningTasksBehavior, "ask">,
+  ) => {
+    if (!remember) return;
+    try {
+      await updateSetting("exitWithRunningTasksBehavior", behavior);
+    } catch (err) {
+      logWarn("Failed to remember exit behavior before action", { behavior, err });
+    }
+  }, [updateSetting]);
+
+  const handleRunningTasksDialogBackground = useCallback(async (remember: boolean) => {
     setRunningTasksDialogOpen(false);
     logInfo("exit: running task dialog selected background", {
       source: pendingExitSourceRef.current,
       remember,
       runningCount: runningTasksCount,
     });
-    if (remember) {
-      void updateSetting("exitWithRunningTasksBehavior", "background");
-    }
-    void enterBackgroundTaskMode();
-  }, [enterBackgroundTaskMode, runningTasksCount, updateSetting]);
+    await persistExitTaskBehaviorBeforeAction(remember, "background");
+    await enterBackgroundTaskMode();
+  }, [enterBackgroundTaskMode, persistExitTaskBehaviorBeforeAction, runningTasksCount]);
 
-  const handleRunningTasksDialogMinimize = useCallback((remember: boolean) => {
+  const handleRunningTasksDialogMinimize = useCallback(async (remember: boolean) => {
     setRunningTasksDialogOpen(false);
     logInfo("exit: running task dialog selected minimize", {
       source: pendingExitSourceRef.current,
       remember,
       runningCount: runningTasksCount,
     });
-    if (remember) {
-      void updateSetting("exitWithRunningTasksBehavior", "minimize");
-    }
-    void minimizeToTray();
-  }, [minimizeToTray, runningTasksCount, updateSetting]);
+    await persistExitTaskBehaviorBeforeAction(remember, "minimize");
+    await minimizeToTray();
+  }, [minimizeToTray, persistExitTaskBehaviorBeforeAction, runningTasksCount]);
 
-  const handleRunningTasksDialogDiscard = useCallback((remember: boolean) => {
+  const handleRunningTasksDialogDiscard = useCallback(async (remember: boolean) => {
     setRunningTasksDialogOpen(false);
     logInfo("exit: running task dialog selected discard", {
       source: pendingExitSourceRef.current,
       remember,
       runningCount: runningTasksCount,
     });
-    if (remember) {
-      void updateSetting("exitWithRunningTasksBehavior", "discard");
-    }
-    void runExitCleanup(pendingExitSourceRef.current, {
+    await persistExitTaskBehaviorBeforeAction(remember, "discard");
+    await runExitCleanup(pendingExitSourceRef.current, {
       discardSessions: true,
       closeAllPty: pendingExitDaemonSessionsCheckedRef.current,
     });
-  }, [runExitCleanup, runningTasksCount, updateSetting]);
+  }, [persistExitTaskBehaviorBeforeAction, runExitCleanup, runningTasksCount]);
 
   // 窗口重新获得焦点（托盘左键 / 通知点击唤回）即退出后台任务模式。
   useEffect(() => {
@@ -1444,10 +1525,10 @@ function App() {
         runningIds,
       });
       if (runningIds.length > 0) {
-        pendingExitSourceRef.current = "window close";
-        pendingExitDaemonSessionsCheckedRef.current = daemonSessionsChecked;
-        setRunningTasksCount(runningIds.length);
-        setRunningTasksDialogOpen(true);
+        await requestExitGuardedByRunningTasks("window close", {
+          runningIds,
+          daemonSessionsChecked,
+        });
       } else {
         setCloseDialogOpen(true);
       }
@@ -1665,9 +1746,11 @@ function App() {
       <ConfirmDialog
         open={restorePromptOpen}
         title="恢复上次会话"
-        message="检测到上次遗留的终端标签。是否恢复这些标签（CLI 会话继续上次对话，普通终端贴回历史画面）？"
+        message="检测到上次保留的终端标签，是否恢复？"
         confirmText="恢复"
         cancelText="不恢复"
+        confirmAutoFocus
+        contentClassName="w-[calc(100vw-2rem)] max-w-[460px]"
         onConfirm={handleConfirmRestoreSessions}
         onClose={handleRejectRestoreSessions}
       />

@@ -1202,7 +1202,14 @@ pub fn desktop_pet_window_sync(
     }
     window
         .show()
-        .map_err(|err| format!("pet_window_show_failed: {err}"))
+        .map_err(|err| format!("pet_window_show_failed: {err}"))?;
+
+    #[cfg(target_os = "windows")]
+    window
+        .set_skip_taskbar(true)
+        .map_err(|err| format!("pet_window_skip_taskbar_failed: {err}"))?;
+
+    Ok(())
 }
 
 fn validated_window_size(bounds: DesktopPetWindowBounds) -> Result<(i32, i32), String> {

@@ -9,6 +9,7 @@ import { useHistoryStore } from "../../stores/historyStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import {
   createDefaultWorktreeTaskName,
+  isWorktreeCreateInProgressError,
   sanitizeWorktreeTaskName,
   validateWorktreeTaskName,
   useWorktreeStore,
@@ -23,6 +24,7 @@ import { ProviderSwitchModal } from "../ProviderSwitchModal";
 import { WorktreeFinishDialog } from "../worktree/WorktreeFinishDialog";
 import { openWindowsTerminal } from "../../lib/externalTerminal";
 import { resolveProjectStartupCommand } from "../../lib/projectStartupCommand";
+import { resolveHistoryProjectPath } from "../../lib/historyProjectPaths";
 import { resolveCliToolHistorySourceId } from "../../lib/cliTools";
 import { shouldSidebarBootstrapProjects } from "../../lib/projectLoadPolicy";
 import { getProviderSwitchAppType, parseProjectEnvVars } from "../../lib/providerSwitching";
@@ -1071,25 +1073,37 @@ export function Sidebar({
   };
 
   const createAndOpenWorktree = async (project: Project, targetPaneId?: string, taskName?: string) => {
-    const worktree = await createWorktreeForProject(project, taskName);
-    await openWorktreeSession(project, worktree, targetPaneId);
-    toast.success(t("worktree.toast.created"), { description: worktree.path });
-    void maybePromptWorktreeDeps(project, worktree);
+    try {
+      const worktree = await createWorktreeForProject(project, taskName);
+      await openWorktreeSession(project, worktree, targetPaneId);
+      toast.success(t("worktree.toast.created"), { description: worktree.path });
+      void maybePromptWorktreeDeps(project, worktree);
+    } catch (err) {
+      if (isWorktreeCreateInProgressError(err)) return;
+      logError("Failed to create worktree", err);
+      toast.error(t("worktree.toast.createFailed"), { description: String(err) });
+    }
   };
 
   const createAndSplitWorktree = async (project: Project, direction: TerminalPaneSplitDirection, taskName?: string) => {
     if (!activeSessionId) return;
-    const worktree = await createWorktreeForProject(project, taskName);
-    const options = buildProjectSplitOptions(project);
-    await splitTerminal(activeSessionId, direction, {
-      ...options,
-      cwd: worktree.path,
-      title: worktree.name,
-      worktreeId: worktree.id,
-    });
-    closeHistory();
-    toast.success(t("worktree.toast.created"), { description: worktree.path });
-    void maybePromptWorktreeDeps(project, worktree);
+    try {
+      const worktree = await createWorktreeForProject(project, taskName);
+      const options = buildProjectSplitOptions(project);
+      await splitTerminal(activeSessionId, direction, {
+        ...options,
+        cwd: worktree.path,
+        title: worktree.name,
+        worktreeId: worktree.id,
+      });
+      closeHistory();
+      toast.success(t("worktree.toast.created"), { description: worktree.path });
+      void maybePromptWorktreeDeps(project, worktree);
+    } catch (err) {
+      if (isWorktreeCreateInProgressError(err)) return;
+      logError("Failed to create worktree split", err);
+      toast.error(t("worktree.toast.createFailed"), { description: String(err) });
+    }
   };
 
   const openProjectInternal = async (project: Project, targetPaneId?: string) => {
@@ -1352,7 +1366,7 @@ export function Sidebar({
       if (rejectUnsupportedCapability(project, "history")) return;
       void openHistory({
         sourceFilter: resolveHistorySourceFilter(project.cli_tool),
-        projectPath: project.path,
+        projectPath: resolveHistoryProjectPath(project),
         projectId: project.id,
       }).then(() => {
         triggerGlobalSearchFocus();
@@ -2624,6 +2638,9 @@ export function Sidebar({
                       return createAndSplitWorktree(worktreePrompt.project, worktreePrompt.direction, worktreePrompt.taskName);
                     }
                     return createAndOpenWorktree(worktreePrompt.project, worktreePrompt.targetPaneId, worktreePrompt.taskName);
+                  }).catch((err) => {
+                    logError("Failed to enable automatic worktree isolation", err);
+                    toast.error(t("worktree.toast.createFailed"), { description: String(err) });
                   });
                 }
                 setWorktreePrompt(null);

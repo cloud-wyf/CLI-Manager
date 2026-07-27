@@ -48,6 +48,7 @@ import {
   type BatchLaunchPaneDirection,
   type CloseBehavior,
   type ExitWithRunningTasksBehavior,
+  type TerminalSessionRestoreMode,
   type TerminalSettingsSectionKey,
   type UnsplitBehavior,
 } from "../../../stores/settingsStore";
@@ -176,7 +177,11 @@ function CollapsibleSettingsSection({
       ) : (
         <div className="p-4">{headerContent}</div>
       )}
-      {(!collapsible || open) && <Box px="md" pb="md">{children}</Box>}
+      {collapsible ? (
+        open === true && <Box px="md" pt="sm" pb="md">{children}</Box>
+      ) : (
+        <Box px="md" pb="md">{children}</Box>
+      )}
     </section>
   );
 }
@@ -199,6 +204,8 @@ export function ThemeSettingsPage() {
   const unsplitBehavior = useSettingsStore((s) => s.unsplitBehavior);
   const closeBehavior = useSettingsStore((s) => s.closeBehavior);
   const exitWithRunningTasksBehavior = useSettingsStore((s) => s.exitWithRunningTasksBehavior);
+  const terminalSessionRestoreEnabled = useSettingsStore((s) => s.terminalSessionRestoreEnabled);
+  const terminalSessionRestoreMode = useSettingsStore((s) => s.terminalSessionRestoreMode);
   const backgroundIncludeFinishedTasks = useSettingsStore((s) => s.backgroundIncludeFinishedTasks);
   const confirmBeforeClosingTerminalTab = useSettingsStore((s) => s.confirmBeforeClosingTerminalTab);
   const terminalTabHoverInfoEnabled = useSettingsStore((s) => s.terminalTabHoverInfoEnabled);
@@ -390,7 +397,12 @@ export function ThemeSettingsPage() {
   const exitWithRunningTasksOptions: { value: ExitWithRunningTasksBehavior; label: string }[] = [
     { value: "ask", label: t("settings.options.exitTasks.ask") },
     { value: "background", label: t("settings.options.exitTasks.background") },
+    { value: "minimize", label: t("settings.options.exitTasks.minimize") },
     { value: "discard", label: t("settings.options.exitTasks.discard") },
+  ];
+  const terminalSessionRestoreModeOptions: { value: TerminalSessionRestoreMode; label: string }[] = [
+    { value: "ask", label: t("settings.options.sessionRestore.ask") },
+    { value: "auto", label: t("settings.options.sessionRestore.auto") },
   ];
   const normalizedDefaultShell = normalizeShellKey(defaultShell);
   const shellSelectValue = normalizedDefaultShell ?? defaultShell;
@@ -645,12 +657,12 @@ export function ThemeSettingsPage() {
 
   return (
     <Stack gap="md">
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start">
+        <Stack gap="md" className="min-w-0 xl:col-start-1 xl:row-start-1">
         <CollapsibleSettingsSection
           title={text("终端行为", "Terminal Behavior")}
           open={terminalSettingsSectionsExpanded.behavior}
           onToggle={() => toggleSection("behavior")}
-          className="xl:col-start-1 xl:row-start-1"
         >
           <Stack gap="md">
             <Stack gap={6}>
@@ -831,6 +843,24 @@ export function ThemeSettingsPage() {
               size="xs"
               aria-label={t("settings.general.exitWithRunningTasks")}
               description={t("settings.general.exitWithRunningTasksDescription")}
+            />
+
+            <Select<TerminalSessionRestoreMode>
+              label={t("settings.general.terminalSessionRestoreMode")}
+              value={terminalSessionRestoreMode}
+              onChange={(value) => {
+                if (value) void update("terminalSessionRestoreMode", value);
+              }}
+              data={terminalSessionRestoreModeOptions}
+              allowDeselect={false}
+              disabled={!terminalSessionRestoreEnabled}
+              size="xs"
+              aria-label={t("settings.general.terminalSessionRestoreMode")}
+              description={
+                terminalSessionRestoreEnabled
+                  ? t("settings.general.terminalSessionRestoreModeDescription")
+                  : t("settings.general.terminalSessionRestoreModeDisabledHint")
+              }
             />
 
             <Card className="border border-border bg-surface-container-lowest" p="sm" radius="lg">
@@ -1027,24 +1057,14 @@ export function ThemeSettingsPage() {
           description={text("扫描并启用可在新建项目中选择的终端。", "Scan and enable terminal types shown when creating projects.")}
           open={terminalSettingsSectionsExpanded.shells}
           onToggle={() => toggleSection("shells")}
-          className="xl:col-start-1 xl:row-start-2"
         >
           {shellProfileSection}
-        </CollapsibleSettingsSection>
-
-        <CollapsibleSettingsSection
-          title={text("终端预览", "Terminal Preview")}
-          collapsible={false}
-          className="hidden self-start xl:sticky xl:top-5 xl:z-10 xl:col-start-2 xl:row-span-4 xl:row-start-1 xl:block"
-        >
-          {terminalPreview}
         </CollapsibleSettingsSection>
 
         <CollapsibleSettingsSection
           title={text("终端主题库", "Terminal Theme Library")}
           open={terminalSettingsSectionsExpanded.themes}
           onToggle={() => toggleSection("themes")}
-          className="xl:col-start-1 xl:row-start-3"
         >
           <Stack gap="md">
             <SegmentedControl<TerminalThemeLibraryMode>
@@ -1183,7 +1203,7 @@ export function ThemeSettingsPage() {
           </Stack>
         </CollapsibleSettingsSection>
 
-        <div className="min-w-0 xl:col-start-1 xl:row-start-4">
+        <div className="min-w-0">
           <CollapsibleSettingsSection
             title={text("终端背景", "Terminal Background")}
             open={terminalSettingsSectionsExpanded.background}
@@ -1192,6 +1212,15 @@ export function ThemeSettingsPage() {
           <TerminalBackgroundSection embedded />
           </CollapsibleSettingsSection>
         </div>
+        </Stack>
+
+        <CollapsibleSettingsSection
+          title={text("终端预览", "Terminal Preview")}
+          collapsible={false}
+          className="hidden self-start xl:sticky xl:top-5 xl:z-10 xl:col-start-2 xl:row-start-1 xl:block"
+        >
+          {terminalPreview}
+        </CollapsibleSettingsSection>
       </section>
     </Stack>
   );
