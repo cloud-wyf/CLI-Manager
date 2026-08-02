@@ -394,6 +394,38 @@ fn derive_transcript_path(home: &Path, cwd: &str, session_id: &str, agent_id: &s
         .to_string()
 }
 
+/// 由父会话 transcript 的真实位置推导同会话下的子 Agent 转录路径。
+fn derive_transcript_path_from_parent(
+    parent_transcript_path: String,
+    session_id: &str,
+    agent_id: &str,
+    wsl_distro_name: Option<&str>,
+) -> Result<String, String> {
+    let parent = normalize_explicit_transcript_path(parent_transcript_path, wsl_distro_name);
+    validate_explicit_transcript_path(&parent)?;
+
+    let parent = PathBuf::from(parent);
+    if !parent
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"))
+    {
+        return Err("parent_transcript_not_jsonl".to_string());
+    }
+    if parent.file_stem().and_then(|stem| stem.to_str()) != Some(session_id) {
+        return Err("parent_transcript_session_mismatch".to_string());
+    }
+
+    let child = parent
+        .with_extension("")
+        .join("subagents")
+        .join(format!("agent-{agent_id}.jsonl"))
+        .to_string_lossy()
+        .to_string();
+    validate_explicit_transcript_path(&child)?;
+    Ok(child)
+}
+
 fn derive_wsl_linux_transcript_path(
     linux_home: &str,
     cwd: &str,
@@ -802,9 +834,10 @@ fn codex_rollout_parent_thread_id(path: &Path) -> Option<String> {
     parent_thread_id
 }
 
-/// 解析转录路径：优先显式 `agentTranscriptPath`，否则由 cwd+sessionId+agentId 推导。
+/// 解析转录路径：优先显式子路径，其次由父 transcript 定位，最后回退 cwd 推导。
 fn resolve_transcript_path(
     transcript_path: Option<String>,
+    parent_transcript_path: Option<String>,
     cwd: Option<String>,
     session_id: Option<String>,
     agent_id: Option<String>,
@@ -834,6 +867,20 @@ fn resolve_transcript_path(
         return Ok(resolved);
     }
 
+    if let Some(parent) = trimmed(parent_transcript_path) {
+        let session_id = trimmed(session_id).ok_or_else(|| "missing_session_id".to_string())?;
+        let agent_id = trimmed(agent_id).ok_or_else(|| "missing_agent_id".to_string())?;
+        debug!(
+            "[subagent_transcript] resolving child transcript from parent path: sessionId={session_id} agentId={agent_id}"
+        );
+        return derive_transcript_path_from_parent(
+            parent,
+            &session_id,
+            &agent_id,
+            wsl_distro_name.as_deref(),
+        );
+    }
+
     let cwd = trimmed(cwd).ok_or_else(|| "missing_cwd".to_string())?;
     let session_id = trimmed(session_id).ok_or_else(|| "missing_session_id".to_string())?;
     let agent_id = trimmed(agent_id).ok_or_else(|| "missing_agent_id".to_string())?;
@@ -859,6 +906,7 @@ pub async fn subagent_transcript_subscribe(
     bridge: State<'_, SubagentTranscriptBridge>,
     key: String,
     transcript_path: Option<String>,
+    parent_transcript_path: Option<String>,
     cwd: Option<String>,
     session_id: Option<String>,
     agent_id: Option<String>,
@@ -867,8 +915,14 @@ pub async fn subagent_transcript_subscribe(
     if key.trim().is_empty() {
         return Err("missing_key".to_string());
     }
-    let path =
-        resolve_transcript_path(transcript_path, cwd, session_id, agent_id, wsl_distro_name)?;
+    let path = resolve_transcript_path(
+        transcript_path,
+        parent_transcript_path,
+        cwd,
+        session_id,
+        agent_id,
+        wsl_distro_name,
+    )?;
     debug!("[subagent_transcript] subscribe resolved path: key={key} path={path}");
     bridge.subscribe(app_handle, key, path)
 }
@@ -1146,16 +1200,112 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(got, explicit.to_string_lossy());
     }
 
     #[test]
+    fn resolve_uses_parent_transcript_before_worktree_cwd() {
+        let parent = home_dir()
+            .unwrap()
+            .join(".claude")
+            .join("projects")
+            .join("D--work-project")
+            .join("sess-1.jsonl");
+        let expected = parent
+            .with_extension("")
+            .join("subagents")
+            .join("agent-a99.jsonl");
+
+        let got = resolve_transcript_path(
+            None,
+            Some(parent.to_string_lossy().to_string()),
+            Some(r"D:\work\project\.claude\worktrees\agent-a99".to_string()),
+            Some("sess-1".to_string()),
+            Some("a99".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(got, expected.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_explicit_child_precedes_parent_transcript() {
+        let root = home_dir()
+            .unwrap()
+            .join(".claude")
+            .join("projects")
+            .join("p");
+        let explicit = root.join("sess-1").join("subagents").join("agent-a.jsonl");
+        let mismatched_parent = root.join("different-session.jsonl");
+
+        let got = resolve_transcript_path(
+            Some(explicit.to_string_lossy().to_string()),
+            Some(mismatched_parent.to_string_lossy().to_string()),
+            None,
+            Some("sess-1".to_string()),
+            Some("a".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(got, explicit.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_rejects_parent_transcript_for_another_session() {
+        let parent = home_dir()
+            .unwrap()
+            .join(".claude")
+            .join("projects")
+            .join("p")
+            .join("different-session.jsonl");
+
+        let err = resolve_transcript_path(
+            None,
+            Some(parent.to_string_lossy().to_string()),
+            None,
+            Some("sess-1".to_string()),
+            Some("a".to_string()),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "parent_transcript_session_mismatch");
+    }
+
+    #[test]
+    fn resolve_converts_linux_parent_transcript_to_wsl_child_path() {
+        let got = resolve_transcript_path(
+            None,
+            Some("/home/me/.claude/projects/p/sess-1.jsonl".to_string()),
+            Some("/home/me/project/.claude/worktrees/agent-a".to_string()),
+            Some("sess-1".to_string()),
+            Some("a".to_string()),
+            Some("Ubuntu-22.04".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            got,
+            r"\\wsl.localhost\Ubuntu-22.04\home\me\.claude\projects\p\sess-1\subagents\agent-a.jsonl"
+        );
+    }
+
+    #[test]
     fn resolve_rejects_explicit_transcript_path_outside_allowed_roots() {
-        let err =
-            resolve_transcript_path(Some(r"C:\tmp\a.jsonl".to_string()), None, None, None, None)
-                .unwrap_err();
+        let err = resolve_transcript_path(
+            Some(r"C:\tmp\a.jsonl".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
             err == "transcript_path_not_absolute" || err == "transcript_path_outside_allowed_roots",
             "got {err}"
@@ -1166,6 +1316,7 @@ mod tests {
     fn explicit_linux_path_converts_to_wsl_unc_when_distro_known() {
         let got = resolve_transcript_path(
             Some(" /home/me/.claude/projects/p/s/subagents/agent-a.jsonl ".to_string()),
+            None,
             None,
             None,
             None,
@@ -1190,6 +1341,7 @@ mod tests {
             .join("agent-a.jsonl");
         let got = resolve_transcript_path(
             Some(format!(" {} ", explicit.to_string_lossy())),
+            None,
             None,
             None,
             None,
@@ -1324,7 +1476,7 @@ mod tests {
 
     #[test]
     fn resolve_requires_parts_when_no_explicit_path() {
-        let err = resolve_transcript_path(None, None, None, None, None).unwrap_err();
+        let err = resolve_transcript_path(None, None, None, None, None, None).unwrap_err();
         // 缺 home 或缺 cwd 都应报错（不静默编出错误路径）。
         assert!(err == "missing_cwd" || err == "no_home_dir", "got {err}");
     }

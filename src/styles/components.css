@@ -91,7 +91,7 @@
 }
 
 #command-template-panel code.text-primary {
-  color: color-mix(in srgb, var(--primary) 58%, var(--terminal-popover-muted) 42%);
+  color: var(--terminal-popover-muted);
 }
 
 #command-template-panel .text-on-surface-variant,
@@ -125,7 +125,7 @@
 }
 
 #command-template-panel {
-  --primary: var(--term-panel-accent, var(--terminal-theme-accent, #5b8def));
+  --primary: var(--terminal-popover-fg);
   --interactive-focus-ring: color-mix(in srgb, var(--primary) 18%, transparent);
   color: var(--terminal-popover-fg);
 }
@@ -263,9 +263,9 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  color: var(--primary);
+  color: var(--terminal-popover-muted);
   border: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
-  background-color: color-mix(in srgb, var(--surface-container-highest) 86%, var(--primary) 14%);
+  background-color: var(--surface-container-highest);
 }
 
 .command-template-panel__title-icon {
@@ -311,6 +311,12 @@
 .command-template-panel__new-button:hover {
   border-color: color-mix(in srgb, var(--primary) 34%, var(--border) 66%);
   background-color: color-mix(in srgb, var(--surface-container-highest) 86%, var(--primary) 14%);
+}
+
+#command-template-panel .ui-primary-action {
+  background-image: none;
+  background-color: var(--surface-container-highest);
+  color: var(--terminal-popover-fg);
 }
 
 .command-template-panel__filters {
@@ -387,9 +393,9 @@
 }
 
 .command-template-panel__scope-tabs button[data-active="true"] {
-  border-color: color-mix(in srgb, var(--primary) 22%, var(--border) 78%);
-  color: color-mix(in srgb, var(--primary) 82%, var(--terminal-popover-fg) 18%);
-  background-color: color-mix(in srgb, var(--surface-container-highest) 88%, var(--primary) 12%);
+  border-color: color-mix(in srgb, var(--border) 78%, var(--terminal-popover-fg) 22%);
+  color: var(--terminal-popover-fg);
+  background-color: var(--surface-container-highest);
   box-shadow: none;
 }
 
@@ -409,6 +415,14 @@
   padding: 6px;
 }
 
+.command-template-panel__skeleton {
+  background-color: color-mix(
+    in srgb,
+    var(--term-panel-card-inner, #181818) 82%,
+    var(--terminal-popover-fg) 18%
+  );
+}
+
 .command-template-panel__row {
   display: flex;
   align-items: center;
@@ -424,7 +438,7 @@
 
 .command-template-panel__row:hover,
 .command-template-panel__row:focus-visible {
-  background-color: color-mix(in srgb, var(--surface-container-highest) 80%, var(--primary) 20%);
+  background-color: var(--surface-container-highest);
 }
 
 .command-template-panel__row-icon {
@@ -2749,6 +2763,24 @@
   scrollbar-gutter: stable;
 }
 
+.ui-terminal-bg-layer .xterm .xterm-scrollable-element
+  > .xterm-scrollbar.xterm-vertical
+  > .xterm-slider {
+  left: calc(50% - 2px) !important;
+  width: 4px !important;
+  border-radius: 999px;
+}
+
+.ui-terminal-bg-layer .xterm .xterm-scrollable-element
+  > .xterm-scrollbar.xterm-vertical:hover
+  > .xterm-slider,
+.ui-terminal-bg-layer .xterm .xterm-scrollable-element
+  > .xterm-scrollbar.xterm-vertical
+  > .xterm-slider.xterm-active {
+  left: 0 !important;
+  width: 100% !important;
+}
+
 .diff-code-inner {
   width: max-content;
   min-width: 100%;
@@ -3460,6 +3492,43 @@
   border-bottom-color: color-mix(in srgb, var(--term-panel-green, #3dd68c) 60%, transparent);
 }
 
+/* The terminal Markdown split pane owns the same semantic palette as the
+   terminal that hosts it. Keep the history transcript renderer local to that
+   palette instead of inheriting the app-shell surface colors. */
+.terminal-markdown-preview {
+  --surface: var(--term-panel-bg, var(--terminal-theme-background, #0c0e10));
+  --surface-container-low: var(--term-panel-bg, var(--terminal-theme-background, #0c0e10));
+  --surface-container-lowest: var(--term-panel-bg, var(--terminal-theme-background, #0c0e10));
+  --surface-container-high: var(--term-panel-card, #121212);
+  --surface-container-highest: var(--term-panel-card-inner, #181818);
+  --text-primary: var(--term-panel-fg, var(--terminal-theme-foreground, #ececec));
+  --text-secondary: color-mix(in srgb, var(--term-panel-fg, #ececec) 82%, var(--term-panel-dim, #9ca0a6) 18%);
+  --text-muted: var(--term-panel-dim, #9ca0a6);
+  --border: var(--term-panel-border, #2e2e2e);
+  --bg-primary: var(--term-panel-bg, #0c0e10);
+  --bg-secondary: var(--term-panel-card-inner, #181818);
+  --bg-tertiary: var(--term-panel-card, #121212);
+  --primary: var(--term-panel-cyan, var(--terminal-theme-accent, #5ac8e0));
+  --accent: var(--term-panel-cyan, var(--terminal-theme-accent, #5ac8e0));
+  --success: var(--term-panel-green, #3dd68c);
+  --warning: var(--term-panel-yellow, #e5c453);
+  --danger: var(--term-panel-red, #f07178);
+  --interactive-hover-bg: color-mix(in srgb, var(--term-panel-fg, #ececec) 9%, transparent);
+  background: var(--term-panel-bg, var(--terminal-theme-background, #0c0e10));
+  color: var(--term-panel-fg, var(--terminal-theme-foreground, #ececec));
+}
+
+.terminal-markdown-preview .ui-markdown-terminal {
+  --md-text: var(--term-panel-fg, #ececec);
+  --md-muted: color-mix(in srgb, var(--term-panel-fg, #ececec) 82%, var(--term-panel-dim, #9ca0a6) 18%);
+  --md-subtle: var(--term-panel-dim, #9ca0a6);
+  --md-border: color-mix(in srgb, var(--term-panel-border, #2e2e2e) 88%, transparent);
+  --md-border-muted: color-mix(in srgb, var(--term-panel-border, #2e2e2e) 72%, transparent);
+  --md-canvas-subtle: color-mix(in srgb, var(--term-panel-card-inner, #181818) 86%, transparent);
+  --md-canvas-muted: color-mix(in srgb, var(--term-panel-green, #3dd68c) 10%, transparent);
+  color: var(--term-panel-fg, #ececec);
+}
+
 .synced-history-transcript-shell {
   display: flex;
   height: 100%;
@@ -4131,6 +4200,62 @@
 
 .ui-terminal-well .ui-terminal-pane {
   border-radius: 8px;
+}
+
+.ui-terminal-pane-marker {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  color: var(--terminal-pane-marker-color);
+  opacity: var(--terminal-pane-marker-opacity);
+}
+
+.ui-terminal-pane-marker > span {
+  position: absolute;
+  display: block;
+  background: currentColor;
+}
+
+.ui-terminal-pane-marker__top,
+.ui-terminal-pane-marker__bottom {
+  right: 0;
+  left: 0;
+  height: var(--terminal-pane-marker-width);
+}
+
+.ui-terminal-pane-marker__top {
+  top: 0;
+}
+
+.ui-terminal-pane-marker__right,
+.ui-terminal-pane-marker__left {
+  top: 0;
+  width: var(--terminal-pane-marker-width);
+  height: var(--terminal-pane-marker-side-height, 2%);
+}
+
+.ui-terminal-pane-marker__right {
+  right: 0;
+}
+
+.ui-terminal-pane-marker__left {
+  left: 0;
+}
+
+.ui-terminal-pane-marker__bottom {
+  bottom: 0;
+  display: none !important;
+}
+
+.ui-terminal-pane-marker[data-marker-style="full"] .ui-terminal-pane-marker__right,
+.ui-terminal-pane-marker[data-marker-style="full"] .ui-terminal-pane-marker__left {
+  bottom: 0;
+  height: auto;
+}
+
+.ui-terminal-pane-marker[data-marker-style="full"] .ui-terminal-pane-marker__bottom {
+  display: block !important;
 }
 
 .ui-terminal-pane-chrome .ui-tab-trigger {

@@ -3,6 +3,14 @@ use serde_json::{json, Map, Value};
 
 pub(super) const HANDOFF_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CcConnectHandoffTransport {
+    #[default]
+    Local,
+    Ssh,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CcConnectHandoffStartRequest {
@@ -40,6 +48,9 @@ pub struct CcConnectHandoffInfo {
     pub provider_name: String,
     pub platform: CcConnectPlatform,
     pub started_at_ms: i64,
+    pub transport: CcConnectHandoffTransport,
+    pub ssh_host_id: Option<String>,
+    pub remote_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,6 +85,12 @@ pub(super) struct PersistedHandoffRecord {
     pub(super) source_project_name: String,
     pub(super) source_project_path: String,
     pub(super) started_at_ms: i64,
+    #[serde(default)]
+    pub(super) transport: CcConnectHandoffTransport,
+    #[serde(default)]
+    pub(super) ssh_host_id: Option<String>,
+    #[serde(default)]
+    pub(super) remote_path: Option<String>,
 }
 
 impl From<&PersistedHandoffRecord> for CcConnectHandoffInfo {
@@ -90,6 +107,9 @@ impl From<&PersistedHandoffRecord> for CcConnectHandoffInfo {
             provider_name: record.provider_name.clone(),
             platform: record.platform,
             started_at_ms: record.started_at_ms,
+            transport: record.transport,
+            ssh_host_id: record.ssh_host_id.clone(),
+            remote_path: record.remote_path.clone(),
         }
     }
 }

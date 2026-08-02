@@ -2,13 +2,22 @@ use log::warn;
 use notify_rust::NotificationResponse;
 use serde::Serialize;
 use std::{env, fs, process::Stdio};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_NOTIFICATION_TITLE_CHARS: usize = 200;
 const MAX_NOTIFICATION_BODY_CHARS: usize = 1000;
 const MAX_NOTIFICATION_ACTION_LABEL_CHARS: usize = 80;
 const MAX_NOTIFICATION_TAB_ID_CHARS: usize = 200;
 const SYSTEM_NOTIFICATION_ACTION_EVENT: &str = "system-notification-action";
+const MIN_TASKBAR_FLASH_COUNT: u32 = 1;
+const MAX_TASKBAR_FLASH_COUNT: u32 = 20;
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq)]
+struct TaskbarFlashParams {
+    flags: u32,
+    count: u32,
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +168,86 @@ pub async fn send_interactive_system_notification(
     Ok(())
 }
 
+#[tauri::command]
+pub fn set_taskbar_attention(
+    app: AppHandle,
+    mode: Option<String>,
+    flash_count: Option<u32>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::mem::size_of;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO};
+
+        let params = taskbar_flash_params(mode.as_deref(), flash_count)?;
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "taskbar_main_window_missing".to_string())?;
+        let hwnd = window
+            .hwnd()
+            .map_err(|err| format!("taskbar_window_handle_failed: {err}"))?;
+        let info = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd: hwnd.0 as _,
+            dwFlags: params.flags,
+            uCount: params.count,
+            dwTimeout: 0,
+        };
+        unsafe {
+            FlashWindowEx(&info);
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        validate_taskbar_attention_request(mode.as_deref(), flash_count)
+    }
+}
+
+fn validate_taskbar_attention_request(
+    mode: Option<&str>,
+    flash_count: Option<u32>,
+) -> Result<(), String> {
+    match mode {
+        None => Ok(()),
+        Some("finite") => match flash_count {
+            Some(count) if (MIN_TASKBAR_FLASH_COUNT..=MAX_TASKBAR_FLASH_COUNT).contains(&count) => {
+                Ok(())
+            }
+            _ => Err("taskbar_flash_count_out_of_range".into()),
+        },
+        Some("untilFocused") => Ok(()),
+        Some(_) => Err("taskbar_attention_mode_invalid".into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn taskbar_flash_params(
+    mode: Option<&str>,
+    flash_count: Option<u32>,
+) -> Result<TaskbarFlashParams, String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY};
+
+    validate_taskbar_attention_request(mode, flash_count)?;
+    Ok(match mode {
+        None => TaskbarFlashParams {
+            flags: FLASHW_STOP,
+            count: 0,
+        },
+        Some("finite") => TaskbarFlashParams {
+            flags: FLASHW_TRAY,
+            count: flash_count.expect("validated finite flash count"),
+        },
+        Some("untilFocused") => TaskbarFlashParams {
+            flags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+            count: u32::MAX,
+        },
+        Some(_) => unreachable!("mode validated above"),
+    })
+}
+
 #[cfg(windows)]
 fn spawn_powershell_notification(script: &str) -> Result<(), String> {
     crate::shell_resolver::silent_command("powershell.exe")
@@ -241,4 +330,53 @@ fn xml_escape(s: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY};
+
+    #[test]
+    fn finite_taskbar_attention_accepts_boundaries() {
+        assert_eq!(
+            taskbar_flash_params(Some("finite"), Some(1)).unwrap(),
+            TaskbarFlashParams {
+                flags: FLASHW_TRAY,
+                count: 1,
+            }
+        );
+        assert_eq!(
+            taskbar_flash_params(Some("finite"), Some(20)).unwrap(),
+            TaskbarFlashParams {
+                flags: FLASHW_TRAY,
+                count: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn finite_taskbar_attention_rejects_out_of_range_counts() {
+        assert!(taskbar_flash_params(Some("finite"), Some(0)).is_err());
+        assert!(taskbar_flash_params(Some("finite"), Some(21)).is_err());
+        assert!(taskbar_flash_params(Some("finite"), None).is_err());
+    }
+
+    #[test]
+    fn until_focused_and_stop_use_expected_flags() {
+        assert_eq!(
+            taskbar_flash_params(Some("untilFocused"), None).unwrap(),
+            TaskbarFlashParams {
+                flags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                count: u32::MAX,
+            }
+        );
+        assert_eq!(
+            taskbar_flash_params(None, None).unwrap(),
+            TaskbarFlashParams {
+                flags: FLASHW_STOP,
+                count: 0,
+            }
+        );
+    }
 }

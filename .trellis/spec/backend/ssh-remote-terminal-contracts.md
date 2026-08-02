@@ -4,7 +4,7 @@
 
 Apply this contract when changing SSH host persistence, remote project creation, remote directory queries, terminal launch, PTY/daemon restore, project capability routing, or project sync/import behavior.
 
-SSH projects support remote terminals plus explicit Claude/Codex Agent Hook integration, read-only history, same-source remote resume, and a full remote Git panel routed through the SSH Agent. Local and WSL projects retain their existing capabilities. Remote files, Worktree, historical statistics, provider switching, external terminal launch, and remote resource monitoring remain separate implementations.
+SSH projects support remote terminals plus explicit Claude/Codex Agent Hook integration, read-only history, same-source remote resume, Codex remote handoff through cc-connect, and a full remote Git panel routed through the SSH Agent. Local and WSL projects retain their existing capabilities. Remote files, Worktree, historical statistics, provider switching, external terminal launch, and remote resource monitoring remain separate implementations.
 
 ## 2. Signatures
 
@@ -52,6 +52,12 @@ pub async fn ssh_agent_hook_apply(...) -> Result<HookConfigReport, String>;
 pub fn ssh_config_default_directory() -> Result<String, String>;
 pub async fn ssh_config_import_preview(config_dir: String)
     -> Result<SshConfigImportPreview, String>;
+pub async fn cc_connect_handoff_preflight(request: CcConnectHandoffStartRequest)
+    -> Result<(), String>;
+pub async fn cc_connect_handoff_start(request: CcConnectHandoffStartRequest)
+    -> Result<CcConnectHandoffStatus, String>;
+pub async fn cc_connect_handoff_cancel()
+    -> Result<CcConnectHandoffStatus, String>;
 ```
 
 ### Terminal launch
@@ -179,6 +185,21 @@ pub struct SshLaunchPlan {
 - The system resources panel is local-only and must be labelled `Local Resources` / `本机资源` for SSH sessions.
 - SSH provider fields stay null/ignored in the launch plan. Hook inspect/install never reads cc-switch or discovers remote provider data.
 
+### cc-connect remote handoff
+
+- SSH handoff is Codex-only and requires a stopped task, a registered SSH project, and a matching host profile. The `cliSessionId` normally comes from the remote Hook; when it is missing, the desktop may bind it only from a unique, recent SSH Codex history match supplied by the registered remote Agent. SSH Worktrees and WSL sessions remain unsupported.
+- Missing-ID recovery must respect how Codex was launched: an explicit `resume <sessionId>` binds only that ID; `resume --last` binds only the uniquely latest updated matching remote project/source/transport session and does not apply fresh-session creation time; a fresh launch uses terminal/daemon creation time plus recent terminal activity. All modes require non-empty history and an ID not already owned by another open terminal. Interactive picker resume, zero matches, ties, and multiple fresh matches fail closed; the desktop must never guess between remote threads.
+- Handoff authentication must be unattended: SSH Config, Agent, identity file, or `credential_ref`. `password_prompt` and `interactive` must fail before the desktop PTY is suspended.
+- Run `cc_connect_handoff_preflight` before releasing the desktop PTY. It must validate the selected platform conversation, cc-connect version, host/jump/proxy/config references, saved credential, remote directory, and remote Codex app-server startup without loading or resuming the selected thread. Handoff requires an authoritative stopped state: Hook/daemon reports `done` or `failed`, or the PTY reports `exited` or `error`. Missing Hook state fails closed. The managed proxy continues to reject fresh threads and Session ID drift when cc-connect takes ownership.
+- cc-connect keeps its session files in a deterministic local placeholder under the CLI-Manager data directory. The remote POSIX path is transport metadata and must never be passed to local filesystem APIs.
+- The managed Codex proxy launches OpenSSH with the same validated transport settings as the SSH terminal, changes to the registered remote directory, exports the project environment plus effective `CODEX_HOME`, injects a scoped `safe.directory`, and starts remote `codex app-server` over stdio.
+- The managed Codex proxy resolves `codex` through the same interactive login-shell environment as the SSH terminal so NVM and equivalent user-managed tool paths remain available. Shell startup stdout must be redirected to stderr until `codex` is executed, then the app-server stdout must be restored to the original SSH stdout; profile banners and initialization output must never enter the JSON-RPC stream.
+- The serialized launch environment may contain only the credential reference. Password values remain in the local credential store and are delivered through the one-shot AskPass broker.
+- During SSH handoff, the proxy rewrites only matching `thread/resume` requests to the registered remote directory and rejects fresh-thread or session-drift requests.
+- Remote app-server turn, approval, completion, and non-retrying error events are converted locally into the existing handoff Hook events. Telegram, Feishu, Weixin, and WeCom therefore share the same progress, permission, completion, and failure notification path without a remote Hook installation.
+- Persist handoff transport, SSH host ID, and remote path with the existing schema-version-1 record using defaulted fields for backward compatibility.
+- On cancellation, re-resolve a structured SSH PTY launch and run `codex resume --no-alt-screen <cliSessionId>` on the same registered host and path. If the project host/path changed, fail closed and keep the recovery lock visible.
+
 ### Sync
 
 - Sync/export carries project `environment_type`, `remote_path`, `cli_config_root`, and `ssh_host_id`, plus SSH host groups and portable SSH host profiles.
@@ -222,6 +243,13 @@ pub struct SshLaunchPlan {
 | SSH Git `rootPath` differs from the Launch Plan `remotePath` | `remote_git_root_mismatch`; reject before bridge dispatch |
 | SSH file context is pending or unavailable | keep/show initial loading or the original load failure; never call local `file_*` with the empty desktop `path` |
 | SSH project terminal has `cwd == ""` | resolve the Git panel root from trimmed `project.remote_path` |
+| SSH handoff uses `password_prompt` or `interactive` | Reject with `handoff_ssh_interactive_auth_unsupported` before suspending the desktop session. |
+| SSH handoff saved credential is missing | Reject with `ssh_credential_missing`; never fall back to an interactive prompt. |
+| SSH handoff Host, jump Host, Config file, remote path, or Codex probe is invalid | Preflight fails and the original desktop PTY remains owned locally. |
+| SSH handoff Hook state is unavailable | Reject with `task_state_unknown` unless the PTY is already `exited` or `error`; do not inspect or resume the thread through a second app-server while the desktop Codex process may still own it. |
+| SSH handoff lacks `cliSessionId` | Keep the session visible as a recoverable desktop-pet candidate. Query remote history through the installed Agent and bind only one time-bounded, unowned SSH Codex match; reject missing Agent, missing terminal start identity, zero matches, ambiguity, or concurrent identity drift. |
+| SSH handoff receives a fresh thread or another Session ID | Proxy returns a JSON-RPC error and does not silently create or switch sessions. |
+| SSH handoff is cancelled after project Host/path changes | Keep `recovery_failed` state and require the user to restore the original registration before retrying. |
 
 ## 5. Good / Base / Bad Cases
 
@@ -272,6 +300,11 @@ pub struct SshLaunchPlan {
 - Assert terminal Git panel path resolution uses `remote_path` for SSH even when `session.cwd == ""`; initial file/Git loading renders `common.loading`; visible-file refresh passes the remote context into `loadProjectFile`.
 - Assert changing an SSH project's Host or `remote_path` while the file panel is open clears the previous tree, rebuilds `SshRemoteFileContext`, and discards success/failure from the old async load; local/WSL Worktree path comparison remains unchanged.
 - Assert export/import preserves portable host fields and the project host binding, while omitting all secrets and machine-local paths.
+- Assert handoff eligibility accepts SSH Codex sessions only after Hook/daemon reports `done` or `failed`, or the PTY reports `exited` or `error`; unavailable Hook state with a live or unknown PTY fails closed alongside known running states, WSL, SSH Worktrees, missing Hosts, and interactive authentication. Assert missing Session IDs bind an explicit resume target exactly, bind `resume --last` only to the unique latest updated matching session, and bind fresh launches only to one recent non-empty session. Old fresh-launch, local, empty, already-bound, missing, tied, ambiguous, and interactive-picker matches fail closed. Preflight must never load or resume the live thread.
+- Assert SSH handoff launch serialization contains the credential reference but no password, preserves proxy/jump/config settings, safely quotes the remote path/environment, and injects exactly one scoped Git `safe.directory` entry.
+- Assert the SSH Codex command uses an interactive login shell for user-managed PATH discovery while routing shell startup output away from app-server stdout and restoring stdout only for the Codex process.
+- Assert the Codex proxy rewrites the SSH resume cwd, rejects fresh-thread/session drift, forwards protocol lines unchanged otherwise, and maps turn/approval/completion/failure events into the existing handoff notifier.
+- Assert cancellation recreates the SSH PTY through the structured launch resolver and refuses recovery after Host or remote-path drift.
 - Manually verify OpenSSH Agent, private key, password/MFA, first host key, changed host key, ProxyJump, ProxyCommand, network interruption, zh-CN/en-US, and 24-hour time display.
 
 ## 7. Wrong vs Correct

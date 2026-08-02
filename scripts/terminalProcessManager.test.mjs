@@ -10,6 +10,12 @@ const tempDir = mkdtempSync(join(tmpdir(), "cli-manager-terminal-process-manager
 process.on("exit", () => rmSync(tempDir, { recursive: true, force: true }));
 
 writeFileSync(join(tempDir, "tauriCore.mjs"), "export async function invoke() { throw new Error('unused invoke'); }\n");
+writeFileSync(join(tempDir, "resourceDiagnosticsLog.mjs"), `
+export const entries = [];
+export function writeResourceDiagnostic(level, source, event, payload) {
+  entries.push({ level, source, event, payload });
+}
+`);
 writeFileSync(join(tempDir, "capabilities.mjs"), `
 export class TerminalCapabilityStore {
   clear() {}
@@ -51,6 +57,7 @@ const transpiled = ts.transpileModule(source, {
   fileName: "TerminalProcessManager.ts",
 }).outputText
   .replace('from "@tauri-apps/api/core"', 'from "./tauriCore.mjs"')
+  .replace('from "../../lib/resourceDiagnosticsLog"', 'from "./resourceDiagnosticsLog.mjs"')
   .replace('from "../capabilities/TerminalCapabilityStore"', 'from "./capabilities.mjs"')
   .replace('from "../transport/PtyHostSocket"', 'from "./ptyHostSocket.mjs"');
 const managerPath = join(tempDir, "TerminalProcessManager.mjs");
@@ -58,6 +65,7 @@ writeFileSync(managerPath, transpiled, "utf8");
 
 const { TerminalProcessManager } = await import(pathToFileURL(managerPath).href);
 const socketStub = await import(pathToFileURL(join(tempDir, "ptyHostSocket.mjs")).href);
+const resourceLogStub = await import(pathToFileURL(join(tempDir, "resourceDiagnosticsLog.mjs")).href);
 
 function frame(sequence, text) {
   return {
@@ -121,6 +129,91 @@ test("out-of-order write callbacks drain and ACK frames in sequence order", asyn
     { sessionId: "session-1", sequence: 2, charCount: 3 },
     { sessionId: "session-1", sequence: 3, charCount: 5 },
   ]);
+});
+
+test("diagnostics track queued bytes and clear them after commit", async () => {
+  const manager = new TerminalProcessManager();
+  const deliveries = [];
+  const dispose = await manager.subscribeOutput("session-diagnostics", (delivery) => deliveries.push(delivery));
+  socketStub.emitOutput("session-diagnostics", {
+    ...frame(10, "diagnostic-output"),
+    sessionId: "session-diagnostics",
+  });
+
+  assert.deepEqual(manager.diagnosticsSnapshot(), {
+    trackedSessions: 1,
+    sessionsWithConsumers: 1,
+    queuedFrames: 1,
+    queuedBytes: "diagnostic-output".length,
+    committedFrames: 0,
+    topBacklogs: [{
+      sessionId: "session-diagnostics",
+      consumerAttached: true,
+      queuedFrames: 1,
+      queuedBytes: "diagnostic-output".length,
+      committedFrames: 0,
+      deliveredFrames: 1,
+    }],
+  });
+
+  deliveries[0].commit("diagnostic-output".length);
+  assert.equal(manager.diagnosticsSnapshot().queuedBytes, 0);
+  assert.equal(manager.diagnosticsSnapshot().queuedFrames, 0);
+  dispose();
+  assert.equal(manager.diagnosticsSnapshot().sessionsWithConsumers, 0);
+  await manager.close("session-diagnostics");
+  assert.equal(manager.diagnosticsSnapshot().trackedSessions, 0);
+});
+
+test("reset replaces prior diagnostics backlog", async () => {
+  const manager = new TerminalProcessManager();
+  await manager.subscribeOutput("session-reset", () => {});
+  socketStub.emitOutput("session-reset", {
+    ...frame(1, "stale-output"),
+    sessionId: "session-reset",
+  });
+  socketStub.emitOutput("session-reset", {
+    kind: "reset",
+    sessionId: "session-reset",
+    sequence: 0,
+    cols: 80,
+    rows: 24,
+    data: new Uint8Array(),
+  });
+
+  const snapshot = manager.diagnosticsSnapshot();
+  assert.equal(snapshot.queuedFrames, 1);
+  assert.equal(snapshot.queuedBytes, 0);
+});
+
+test("backlog warning is deduplicated and can fire again after recovery", async () => {
+  resourceLogStub.entries.length = 0;
+  const manager = new TerminalProcessManager();
+  const deliveries = [];
+  await manager.subscribeOutput("session-warning", (delivery) => deliveries.push(delivery));
+  const thresholdPayload = new Uint8Array(4 * 1024 * 1024);
+
+  socketStub.emitOutput("session-warning", {
+    ...frame(1, ""),
+    sessionId: "session-warning",
+    data: thresholdPayload,
+  });
+  socketStub.emitOutput("session-warning", {
+    ...frame(2, "x"),
+    sessionId: "session-warning",
+  });
+  assert.equal(resourceLogStub.entries.filter((entry) => entry.level === "warn").length, 1);
+
+  deliveries[0].commit(0);
+  assert.equal(resourceLogStub.entries.filter((entry) => entry.level === "info").length, 1);
+  assert.equal(resourceLogStub.entries[1].event, "backlogRecovered");
+
+  socketStub.emitOutput("session-warning", {
+    ...frame(3, ""),
+    sessionId: "session-warning",
+    data: thresholdPayload,
+  });
+  assert.equal(resourceLogStub.entries.filter((entry) => entry.level === "warn").length, 2);
 });
 
 test("terminal color updates stay behind the process manager boundary", async () => {

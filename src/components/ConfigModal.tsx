@@ -16,6 +16,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Check, ChevronDown } from "./icons";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { ShellSelect } from "./ShellSelect";
 import { VendorIcon, inferVendor } from "./VendorIcon";
 import { CliToolIcon } from "./CliToolIcon";
 import { Textarea } from "./ui/textarea";
@@ -35,6 +36,7 @@ import {
   getCliArgsHistorySuggestions,
   type CliArgsHistoryEntry,
 } from "../lib/cliArgsHistory";
+import { useSshDirectoryBrowser } from "../hooks/useSshDirectoryBrowser";
 
 interface Props {
   project?: Project;
@@ -48,11 +50,6 @@ interface SshPathCheckResult {
   exists: boolean;
   accessible: boolean;
   gitRepository: boolean;
-}
-
-interface SshDirectoryEntry {
-  name: string;
-  path: string;
 }
 
 const CLI_TOOL_OPTIONS = CLI_TOOL_DESCRIPTORS.map((tool) => tool.command);
@@ -141,10 +138,6 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
   const [cliConfigRoot, setCliConfigRoot] = useState(sourceProject?.cli_config_root ?? "");
   const [remotePickerOpen, setRemotePickerOpen] = useState(false);
   const [remotePickerTarget, setRemotePickerTarget] = useState<"projectPath" | "cliConfigRoot">("projectPath");
-  const [remotePickerPath, setRemotePickerPath] = useState(sourceProject?.remote_path || "/");
-  const [remoteDirectories, setRemoteDirectories] = useState<SshDirectoryEntry[]>([]);
-  const [remotePickerLoading, setRemotePickerLoading] = useState(false);
-  const [remotePickerError, setRemotePickerError] = useState("");
   const [remotePathStatus, setRemotePathStatus] = useState<SshPathCheckResult | null>(null);
   const [groupId, setGroupId] = useState<string | null>(
     cloneFrom?.group_id ?? project?.group_id ?? defaultGroupId ?? null
@@ -316,12 +309,25 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
   const selectedSshHost = sshHosts.find((host) => host.id === sshHostId) ?? null;
 
   const describeRemotePathError = useCallback((err: unknown) => {
-    const code = String(err);
+    const code = err instanceof Error ? err.message : String(err);
+    if (code === "ssh_host_not_found") return t("configModal.ssh.selectHost");
     if (code === "ssh_interactive_auth_required") return t("configModal.ssh.interactiveBrowseUnavailable");
     if (code === "ssh_remote_path_invalid") return t("configModal.ssh.pathInvalid");
     if (code === "ssh_remote_path_parent_forbidden") return t("configModal.ssh.pathParentForbidden");
     return code;
   }, [t]);
+
+  const {
+    path: remotePickerPath,
+    setPath: setRemotePickerPath,
+    entries: remoteDirectories,
+    loading: remotePickerLoading,
+    error: remotePickerError,
+    load: loadRemoteDirectories,
+    close: closeRemoteDirectoryBrowser,
+  } = useSshDirectoryBrowser(selectedSshHost, sshHosts, {
+    describeError: describeRemotePathError,
+  });
 
   const checkRemotePath = async () => {
     if (!selectedSshHost || !remotePath.trim()) {
@@ -342,35 +348,16 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
     }
   };
 
-  const loadRemoteDirectories = useCallback(async (nextPath: string) => {
-    const normalizedPath = nextPath.trim() || "/";
-    setRemotePickerPath(normalizedPath);
-    const host = sshHosts.find((candidate) => candidate.id === sshHostId);
-    if (!host) {
-      setRemotePickerError(t("configModal.ssh.selectHost"));
-      return;
-    }
-    setRemotePickerLoading(true);
-    setRemotePickerError("");
-    try {
-      const entries = await invoke<SshDirectoryEntry[]>("ssh_list_directories", {
-        spec: buildSshConnectionSpec(host, sshHosts),
-        path: normalizedPath,
-      });
-      setRemoteDirectories(entries);
-    } catch (err) {
-      setRemoteDirectories([]);
-      setRemotePickerError(describeRemotePathError(err));
-    } finally {
-      setRemotePickerLoading(false);
-    }
-  }, [describeRemotePathError, sshHostId, sshHosts, t]);
-
   const openRemotePicker = (target: "projectPath" | "cliConfigRoot") => {
     const initialPath = target === "projectPath" ? remotePath.trim() || "/" : cliConfigRoot.trim() || "/";
     setRemotePickerTarget(target);
     setRemotePickerOpen(true);
     void loadRemoteDirectories(initialPath);
+  };
+
+  const closeRemotePicker = () => {
+    setRemotePickerOpen(false);
+    closeRemoteDirectoryBrowser();
   };
 
   const selectWslPickerPath = (selectedPath: string) => {
@@ -761,13 +748,14 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
 
               {projectType === "local" && <div>
                   <label htmlFor={shellFieldId} className="ui-config-form-label">{t("configModal.shell")}</label>
-                  <Select
+                  <ShellSelect
                     id={shellFieldId}
                     key={shellSelectKey}
                     value={shellSelectValue}
-                    aria-label={t("configModal.a11y.shell")}
-                    onChange={(e) => {
-                      const nextShell = e.target.value;
+                    ariaLabel={t("configModal.a11y.shell")}
+                    placeholder={t("configModal.shell")}
+                    options={shellOptions}
+                    onChange={(nextShell) => {
                       logInfo("[config-modal] shell select onChange", {
                         instanceId: logInstanceIdRef.current,
                         nextShell,
@@ -782,11 +770,7 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
                       setShell(nextShell);
                     }}
                     className="text-sm"
-                  >
-                    {shellOptions.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </Select>
+                  />
               </div>}
 
               {cliTool.trim() === "" && (
@@ -968,7 +952,10 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
         </DialogContent>
       </Dialog>
 
-      <Dialog open={remotePickerOpen} onOpenChange={setRemotePickerOpen}>
+      <Dialog open={remotePickerOpen} onOpenChange={(nextOpen) => {
+        if (nextOpen) setRemotePickerOpen(true);
+        else closeRemotePicker();
+      }}>
         <DialogContent className="w-[calc(100vw-2rem)] max-w-[620px] overflow-hidden p-0">
           <div className="border-b border-border px-4 py-3">
             <DialogTitle>{t(remotePickerTarget === "projectPath" ? "configModal.ssh.pickerTitle" : "configModal.ssh.configRootPickerTitle")}</DialogTitle>
@@ -992,16 +979,13 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
                 value={remotePickerPath}
                 aria-label={t(remotePickerTarget === "projectPath" ? "configModal.ssh.remotePath" : "configModal.ssh.cliConfigRoot")}
                 placeholder="/"
-                onChange={(event) => {
-                  setRemotePickerPath(event.target.value);
-                  setRemotePickerError("");
-                }}
+                onChange={(event) => setRemotePickerPath(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void loadRemoteDirectories(remotePickerPath);
                 }}
                 className="flex-1 font-mono text-sm"
               />
-              <Button type="button" variant="outline" onClick={() => void loadRemoteDirectories(remotePickerPath)}>
+              <Button type="button" variant="outline" onClick={() => void loadRemoteDirectories(remotePickerPath, { force: true })}>
                 {t("common.refresh")}
               </Button>
             </div>
@@ -1024,7 +1008,7 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
             </div>
           </div>
           <DialogFooter className="border-t border-border px-4 py-3">
-            <Button type="button" variant="outline" onClick={() => setRemotePickerOpen(false)}>{t("common.cancel")}</Button>
+            <Button type="button" variant="outline" onClick={closeRemotePicker}>{t("common.cancel")}</Button>
             <Button
               type="button"
               onClick={() => {
@@ -1034,7 +1018,7 @@ export function ConfigModal({ project, cloneFrom, defaultGroupId, onManageSshHos
                 } else {
                   setCliConfigRoot(remotePickerPath.trim() || "/");
                 }
-                setRemotePickerOpen(false);
+                closeRemotePicker();
               }}
             >
               {t("configModal.ssh.selectCurrentDirectory")}

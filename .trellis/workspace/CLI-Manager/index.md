@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 34
-- **Last Active**: 2026-07-24
+- **Total Sessions**: 36
+- **Last Active**: 2026-07-31
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1154 | Active |
+| `journal-1.md` | ~1200 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,8 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 35 | 2026-07-31 | 终端状态标记设置预览 | `2e73f3a7` | `feat/terminal-status-marker-settings` |
+| 34 | 2026-07-31 | 终端状态标记设置与视觉优化 | `5603bde1` | `feat/terminal-status-marker-settings` |
 | 34 | 2026-07-22 | 修复 Web Server 迁移校验漂移 | `2663048e` | `feat/web-management-capabilities` |
 | 33 | 2026-07-24 | 完善终端 Tab 悬浮信息卡 | `592729e9` | `master` |
 | 32 | 2026-07-23 | 修复跨 Workspan 终端空白 | `5cd5011d` | `master` |

@@ -2,7 +2,7 @@ import type { HistorySessionSummary } from "./types";
 
 type HistorySessionIdentity = Pick<
   HistorySessionSummary,
-  "source" | "session_id" | "file_path"
+  "source" | "session_id" | "file_path" | "session_ref"
 >;
 
 function normalizeIdentityPath(value: string): string {
@@ -23,10 +23,37 @@ export function sameHistorySessionIdentity(
   right: HistorySessionIdentity
 ): boolean {
   const source = left.source.trim().toLowerCase();
+  const rightSource = right.source.trim().toLowerCase();
   const sessionId = left.session_id.trim().toLowerCase();
+  const rightSessionId = right.session_id.trim().toLowerCase();
+  if (!source || !sessionId || source !== rightSource || sessionId !== rightSessionId) {
+    return false;
+  }
+
+  const leftTransport = left.session_ref?.transportKind.trim().toLowerCase() ?? "";
+  const rightTransport = right.session_ref?.transportKind.trim().toLowerCase() ?? "";
+  if (leftTransport === "ssh" || rightTransport === "ssh") {
+    const leftRef = left.session_ref;
+    const rightRef = right.session_ref;
+    if (!leftRef || !rightRef || leftTransport !== "ssh" || rightTransport !== "ssh") {
+      return false;
+    }
+
+    const leftRefSource = leftRef.sourceId.trim().toLowerCase();
+    const rightRefSource = rightRef.sourceId.trim().toLowerCase();
+    const leftRefSessionId = leftRef.sourceSessionId.trim().toLowerCase();
+    const rightRefSessionId = rightRef.sourceSessionId.trim().toLowerCase();
+    const leftInstanceId = leftRef.sourceInstanceId.trim();
+    const rightInstanceId = rightRef.sourceInstanceId.trim();
+    return Boolean(leftRefSource && leftRefSessionId && leftInstanceId && rightInstanceId)
+      && leftRefSource === source
+      && rightRefSource === rightSource
+      && leftRefSessionId === sessionId
+      && rightRefSessionId === rightSessionId
+      && leftInstanceId === rightInstanceId;
+  }
+
   const filePath = normalizeIdentityPath(left.file_path);
-  return Boolean(source && sessionId && filePath)
-    && source === right.source.trim().toLowerCase()
-    && sessionId === right.session_id.trim().toLowerCase()
+  return Boolean(filePath)
     && filePath === normalizeIdentityPath(right.file_path);
 }

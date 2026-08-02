@@ -1715,3 +1715,300 @@ WebDAV 工作区快照现同步可移植 SSH 主机分组、主机档案及项�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 50: 修复 Git Diff 主题与同步横向滚动
+
+**Date**: 2026-07-28
+**Task**: 修复 Git Diff 主题与同步横向滚动
+**Branch**: `feat/git-power`
+
+### Summary
+
+统一 Diff 终端主题与工具栏状态，修复源文件和 Pin 打开流程，新增持久化换行/打开偏好，并让 nowrap Split 保持固定中线和左右同步滚动。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `354dbafc` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 51: 完成 Git Diff 审阅升级父任务验收
+
+**Date**: 2026-07-28
+**Task**: 完成 Git Diff 审阅升级父任务验收
+**Branch**: `feat/git-power`
+
+### Summary
+
+补交 Git Diff 审阅升级父任务材料，记录用户人工验收结论，关联最终 master 合并提交并完成 Trellis 归档。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a68e6ee9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 52: 升级桌面应用版本至 V1.3.2
+
+**Date**: 2026-07-28
+**Task**: 升级桌面应用版本至 V1.3.2
+**Branch**: `feat/git-power`
+
+### Summary
+
+统一 npm、Tauri 与 Rust 桌面应用版本元数据为 1.3.2，保持 SSH Agent 0.1.5 和既有 V1.3.2 Changelog 不变，并完成锁文件与 Cargo 校验。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c3e6a7ae` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 53: 修复同目录 Tab 切换时文件树刷新
+
+**Date**: 2026-07-28
+**Task**: 修复同目录 Tab 切换时文件树刷新
+**Branch**: `feat/git-power`
+
+### Summary
+
+文件项目打开按实际本地或 SSH 文件位置幂等；同目录切换保留文件树、展开和滚动状态，补充回归测试、V1.3.2 变更记录与前端状态规约。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1dd1822c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 54: 解决 PR173 冲突并收紧 SSH 托管资格
+
+**Date**: 2026-07-28
+**Task**: 解决 PR173 冲突并收紧 SSH 托管资格
+**Branch**: `pr-173-fix`
+
+### Summary
+
+合并 PR #173 与最新 master，将 SSH Codex 托管在未知状态下改为失败关闭，并把所有变更归入 V1.3.2；目标测试、TypeScript 检查与 Rust 检查通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `17309f78` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 55: 修复折叠侧边栏项目悬浮提示
+
+**Date**: 2026-07-29
+**Task**: 修复折叠侧边栏项目悬浮提示
+**Branch**: `master`
+
+### Summary
+
+修复 issue #175：避免 Claude/Codex 厂商 SVG 内置标题覆盖折叠项目按钮的项目名称提示；同步 V1.3.3 Changelog 与功能清单，TypeScript 检查通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `926e2135` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 56: 修复 Codex 换行与会话精确恢复
+
+**Date**: 2026-07-29
+**Task**: 修复 Codex 换行与会话精确恢复
+**Branch**: `master`
+
+### Summary
+
+修复 Codex 换行快捷键识别；历史继续对话创建时绑定明确会话 ID，并让 Hook 对账持久化快照，避免重启后多个 Tab 串到同一最近会话。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `342d526d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 57: 动态注入 R2 发布域名
+
+**Date**: 2026-07-29
+**Task**: 动态注入 R2 发布域名
+**Branch**: `master`
+
+### Summary
+
+将 R2_PUBLIC_BASE_URL 作为发布唯一配置源，构建时注入 Tauri updater、SSH Agent 和安装脚本，并补齐校验、测试与发布规范。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f4f3e301` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 58: 修复 Pi 终端消息不可见
+
+**Date**: 2026-07-29
+**Task**: 修复 Pi 终端消息不可见
+**Branch**: `master`
+
+### Summary
+
+定位 Issue #177 为 OSC 133 扫描器遗漏相邻集成序列之间文本；修复归一化、拆分 Pi 诊断职责，并补齐任意 frame 边界回归测试。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6cbfcb77` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

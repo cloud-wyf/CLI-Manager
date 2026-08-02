@@ -1,13 +1,14 @@
 #[cfg(not(target_os = "windows"))]
 use crate::codex_app_server_proxy::HELPER_SUBCOMMAND as CODEX_PROXY_SUBCOMMAND;
 use crate::codex_app_server_proxy::{
-    CODEX_BASE_URL_OVERRIDE_ENV, CODEX_ENV_KEY_OVERRIDE_ENV, CODEX_LAUNCHER_ENV,
-    CODEX_MODEL_OVERRIDE_ENV, CODEX_REMOTE_PROVIDER_NAME, CODEX_WIRE_API_OVERRIDE_ENV,
-    EXPECTED_SESSION_ID_ENV, PROXY_EXECUTABLE_ENV,
+    SshCodexLaunch, CODEX_BASE_URL_OVERRIDE_ENV, CODEX_ENV_KEY_OVERRIDE_ENV, CODEX_LAUNCHER_ENV,
+    CODEX_MODEL_OVERRIDE_ENV, CODEX_REMOTE_PROVIDER_NAME, CODEX_SSH_LAUNCH_ENV,
+    CODEX_WIRE_API_OVERRIDE_ENV, EXPECTED_SESSION_ID_ENV, PROXY_EXECUTABLE_ENV,
 };
 #[cfg(target_os = "windows")]
 use crate::process_job::ChildJob;
 use crate::shell_resolver::{output_with_timeout, silent_command};
+use crate::ssh_transport::SshTransportSpec;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -992,6 +993,11 @@ struct RegisteredProject {
     codex_provider_id: Option<String>,
     provider_name: Option<String>,
     provider_is_global: bool,
+    environment_type: String,
+    ssh_host_id: Option<String>,
+    remote_path: String,
+    cli_config_root: String,
+    env_vars: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1017,6 +1023,34 @@ struct RegisteredProjectRow {
     group_id: Option<String>,
     sort_order: i64,
     provider_overrides: String,
+    environment_type: String,
+    ssh_host_id: Option<String>,
+    remote_path: String,
+    cli_config_root: String,
+    host_codex_config_root: String,
+    env_vars: String,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredSshHost {
+    host: String,
+    port: u16,
+    username: String,
+    config_alias: String,
+    config_file: String,
+    auth_mode: String,
+    identity_file: String,
+    credential_ref: String,
+    jump_mode: String,
+    jump_host_id: Option<String>,
+    proxy_type: String,
+    proxy_host: String,
+    proxy_port: u16,
+    proxy_command: String,
+    connect_timeout_sec: u64,
+    server_alive_interval_sec: u64,
+    server_alive_count_max: u32,
+    startup_script: String,
 }
 
 #[derive(Debug, Default)]
@@ -2195,11 +2229,12 @@ struct RemoteCodexProviderLaunch {
 
 struct RemoteCodexLaunch {
     wrapper_dir: PathBuf,
-    launcher: PathBuf,
+    launcher: Option<PathBuf>,
     proxy_executable: PathBuf,
     expected_session_id: Option<String>,
-    codex_home: PathBuf,
+    codex_home: Option<PathBuf>,
     provider: Option<RemoteCodexProviderLaunch>,
+    ssh_launch: Option<SshCodexLaunch>,
 }
 
 fn codex_config_dir(profile: &CcConnectProfile) -> Result<PathBuf, String> {
@@ -2269,7 +2304,7 @@ fn resolve_codex_launcher_from_path(
 #[cfg(not(target_os = "windows"))]
 fn codex_profile_wrapper_payload() -> String {
     format!(
-        "#!/bin/sh\nif [ \"${{1:-}}\" = \"app-server\" ]; then\n  exec \"${PROXY_EXECUTABLE_ENV}\" {CODEX_PROXY_SUBCOMMAND} \"$@\"\nfi\nif [ -n \"${{{CODEX_MODEL_OVERRIDE_ENV}:-}}\" ]; then\n  exec \"${CODEX_LAUNCHER_ENV}\" -c \"model_provider={CODEX_REMOTE_PROVIDER_NAME}\" -c \"model_providers.{CODEX_REMOTE_PROVIDER_NAME}.name=CLI-Manager remote\" -c \"${CODEX_BASE_URL_OVERRIDE_ENV}\" -c \"${CODEX_ENV_KEY_OVERRIDE_ENV}\" -c \"${CODEX_WIRE_API_OVERRIDE_ENV}\" -c \"${CODEX_MODEL_OVERRIDE_ENV}\" \"$@\"\nelse\n  exec \"${CODEX_LAUNCHER_ENV}\" -c \"model_provider={CODEX_REMOTE_PROVIDER_NAME}\" -c \"model_providers.{CODEX_REMOTE_PROVIDER_NAME}.name=CLI-Manager remote\" -c \"${CODEX_BASE_URL_OVERRIDE_ENV}\" -c \"${CODEX_ENV_KEY_OVERRIDE_ENV}\" -c \"${CODEX_WIRE_API_OVERRIDE_ENV}\" \"$@\"\nfi\n"
+        "#!/bin/sh\nif [ -n \"${{{CODEX_SSH_LAUNCH_ENV}:-}}\" ]; then\n  exec \"${PROXY_EXECUTABLE_ENV}\" {CODEX_PROXY_SUBCOMMAND} \"$@\"\nfi\nif [ \"${{1:-}}\" = \"app-server\" ]; then\n  exec \"${PROXY_EXECUTABLE_ENV}\" {CODEX_PROXY_SUBCOMMAND} \"$@\"\nfi\nif [ -z \"${{{CODEX_BASE_URL_OVERRIDE_ENV}:-}}\" ]; then\n  exec \"${CODEX_LAUNCHER_ENV}\" \"$@\"\nfi\nif [ -n \"${{{CODEX_MODEL_OVERRIDE_ENV}:-}}\" ]; then\n  exec \"${CODEX_LAUNCHER_ENV}\" -c \"model_provider={CODEX_REMOTE_PROVIDER_NAME}\" -c \"model_providers.{CODEX_REMOTE_PROVIDER_NAME}.name=CLI-Manager remote\" -c \"${CODEX_BASE_URL_OVERRIDE_ENV}\" -c \"${CODEX_ENV_KEY_OVERRIDE_ENV}\" -c \"${CODEX_WIRE_API_OVERRIDE_ENV}\" -c \"${CODEX_MODEL_OVERRIDE_ENV}\" \"$@\"\nelse\n  exec \"${CODEX_LAUNCHER_ENV}\" -c \"model_provider={CODEX_REMOTE_PROVIDER_NAME}\" -c \"model_providers.{CODEX_REMOTE_PROVIDER_NAME}.name=CLI-Manager remote\" -c \"${CODEX_BASE_URL_OVERRIDE_ENV}\" -c \"${CODEX_ENV_KEY_OVERRIDE_ENV}\" -c \"${CODEX_WIRE_API_OVERRIDE_ENV}\" \"$@\"\nfi\n"
     )
 }
 
@@ -2380,8 +2415,11 @@ fn prepare_remote_codex_launch(
     if profile.agent != CcConnectAgent::Codex {
         return Ok(None);
     }
-    let provider = match project.codex_provider_id.as_deref() {
-        Some(provider_id) => {
+    let ssh_launch = (project.environment_type == "ssh")
+        .then(|| load_ssh_codex_launch(project))
+        .transpose()?;
+    let provider = match (ssh_launch.is_none(), project.codex_provider_id.as_deref()) {
+        (true, Some(provider_id)) => {
             let database_path = configured_cc_switch_db_path(Some(profile))
                 .ok_or_else(|| "home_dir_unavailable".to_string())?;
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2403,19 +2441,25 @@ fn prepare_remote_codex_launch(
                 secret: runtime.secret_value,
             })
         }
-        None => None,
+        _ => None,
     };
     #[cfg(not(target_os = "windows"))]
-    if provider.is_none() {
+    if provider.is_none() && ssh_launch.is_none() {
         return Ok(None);
     }
-    let codex_home = codex_config_dir(profile)?;
+    let codex_home = ssh_launch
+        .is_none()
+        .then(|| codex_config_dir(profile))
+        .transpose()?;
     let wrapper_path = write_codex_profile_wrapper()?;
     let wrapper_dir = wrapper_path
         .parent()
         .ok_or_else(|| "Codex wrapper directory is missing".to_string())?
         .to_path_buf();
-    let launcher = resolve_codex_launcher(&wrapper_dir)?;
+    let launcher = ssh_launch
+        .is_none()
+        .then(|| resolve_codex_launcher(&wrapper_dir))
+        .transpose()?;
     let proxy_executable = env::current_exe()
         .map_err(|err| format!("resolve Codex app-server proxy failed: {err}"))?;
     let expected_session_id =
@@ -2427,6 +2471,7 @@ fn prepare_remote_codex_launch(
         expected_session_id,
         codex_home,
         provider,
+        ssh_launch,
     }))
 }
 
@@ -2442,9 +2487,31 @@ fn apply_remote_codex_launch_environment(
         env::join_paths(paths).map_err(|err| format!("build Codex wrapper PATH failed: {err}"))?;
     command
         .env("PATH", path_value)
-        .env(CODEX_LAUNCHER_ENV, &launch.launcher)
-        .env(PROXY_EXECUTABLE_ENV, &launch.proxy_executable)
-        .env("CODEX_HOME", &launch.codex_home);
+        .env(PROXY_EXECUTABLE_ENV, &launch.proxy_executable);
+    match launch.launcher.as_ref() {
+        Some(launcher) => {
+            command.env(CODEX_LAUNCHER_ENV, launcher);
+        }
+        None => {
+            command.env_remove(CODEX_LAUNCHER_ENV);
+        }
+    }
+    match launch.codex_home.as_ref() {
+        Some(codex_home) => {
+            command.env("CODEX_HOME", codex_home);
+        }
+        None => {
+            command.env_remove("CODEX_HOME");
+        }
+    }
+    match launch.ssh_launch.as_ref() {
+        Some(ssh_launch) => {
+            command.env(CODEX_SSH_LAUNCH_ENV, ssh_launch.encode()?);
+        }
+        None => {
+            command.env_remove(CODEX_SSH_LAUNCH_ENV);
+        }
+    }
     match launch.expected_session_id.as_ref() {
         Some(session_id) => {
             command.env(EXPECTED_SESSION_ID_ENV, session_id);
@@ -2489,7 +2556,12 @@ fn probe_remote_codex_app_server(launch: &RemoteCodexLaunch) -> Result<(), Strin
         command.env(&provider.env_key, &provider.secret);
     }
     apply_remote_codex_launch_environment(&mut command, launch)?;
-    let output = output_with_timeout(command, CODEX_APP_SERVER_PROBE_TIMEOUT)
+    let probe_timeout = launch
+        .ssh_launch
+        .as_ref()
+        .map(|ssh| Duration::from_secs(ssh.transport.connect_timeout_sec.saturating_add(10)))
+        .unwrap_or(CODEX_APP_SERVER_PROBE_TIMEOUT);
+    let output = output_with_timeout(command, probe_timeout)
         .map_err(|err| format!("Codex app-server proxy probe failed: {err}"))?;
     if output.status.success() {
         return Ok(());
@@ -2648,9 +2720,15 @@ fn registered_project_from_row(
     group_path: &[RegisteredGroupSegment],
     catalog: &ProviderCatalog,
 ) -> RegisteredProject {
-    let (provider_id, provider_name, provider_is_global) =
-        project_provider(row.agent, &row.provider_overrides, catalog);
-    let codex_provider_id = if row.agent == CcConnectAgent::Codex {
+    let remote = row.environment_type == "ssh";
+    let (provider_id, provider_name, provider_is_global) = if remote {
+        (None, None, true)
+    } else {
+        project_provider(row.agent, &row.provider_overrides, catalog)
+    };
+    let codex_provider_id = if remote {
+        None
+    } else if row.agent == CcConnectAgent::Codex {
         provider_id.clone()
     } else {
         project_provider(CcConnectAgent::Codex, &row.provider_overrides, catalog).0
@@ -2665,6 +2743,15 @@ fn registered_project_from_row(
         codex_provider_id,
         provider_name,
         provider_is_global,
+        environment_type: row.environment_type.clone(),
+        ssh_host_id: row.ssh_host_id.clone(),
+        remote_path: row.remote_path.clone(),
+        cli_config_root: if row.cli_config_root.trim().is_empty() {
+            row.host_codex_config_root.clone()
+        } else {
+            row.cli_config_root.clone()
+        },
+        env_vars: row.env_vars.clone(),
     }
 }
 
@@ -2860,8 +2947,15 @@ fn load_registered_projects(
             .await
             .map_err(|err| format!("query CLI-Manager groups failed: {err}"))?;
         let project_rows = sqlx::query(
-            "SELECT id, name, path, cli_tool, group_id, sort_order, provider_overrides \
-             FROM projects",
+            "SELECT p.id, p.name, p.path, p.cli_tool, p.group_id, p.sort_order, \
+                    p.provider_overrides, p.environment_type, p.ssh_host_id, p.remote_path, \
+                    p.cli_config_root, p.env_vars, \
+                    COALESCE(( \
+                      SELECT pref.configured_root FROM ssh_host_tool_preferences AS pref \
+                      WHERE pref.host_id = p.ssh_host_id AND pref.source = 'codex' \
+                      LIMIT 1 \
+                    ), '') AS host_codex_config_root \
+             FROM projects AS p",
         )
         .fetch_all(&mut connection)
         .await
@@ -2917,6 +3011,24 @@ fn load_registered_projects(
                     provider_overrides: row
                         .try_get("provider_overrides")
                         .map_err(|err| format!("read project provider override failed: {err}"))?,
+                    environment_type: row
+                        .try_get("environment_type")
+                        .map_err(|err| format!("read project environment type failed: {err}"))?,
+                    ssh_host_id: row
+                        .try_get("ssh_host_id")
+                        .map_err(|err| format!("read project SSH host failed: {err}"))?,
+                    remote_path: row
+                        .try_get("remote_path")
+                        .map_err(|err| format!("read project remote path failed: {err}"))?,
+                    cli_config_root: row
+                        .try_get("cli_config_root")
+                        .map_err(|err| format!("read project CLI config root failed: {err}"))?,
+                    host_codex_config_root: row
+                        .try_get("host_codex_config_root")
+                        .map_err(|err| format!("read SSH Codex config root failed: {err}"))?,
+                    env_vars: row
+                        .try_get("env_vars")
+                        .map_err(|err| format!("read project environment failed: {err}"))?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -2927,6 +3039,246 @@ fn load_registered_projects(
             &provider_catalog,
         ))
     })
+}
+
+fn sqlite_u16(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<u16, String> {
+    let value: i64 = row
+        .try_get(field)
+        .map_err(|err| format!("read SSH host {field} failed: {err}"))?;
+    u16::try_from(value).map_err(|_| format!("read SSH host {field} failed: out of range"))
+}
+
+fn sqlite_u32(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<u32, String> {
+    let value: i64 = row
+        .try_get(field)
+        .map_err(|err| format!("read SSH host {field} failed: {err}"))?;
+    u32::try_from(value).map_err(|_| format!("read SSH host {field} failed: out of range"))
+}
+
+fn sqlite_u64(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<u64, String> {
+    let value: i64 = row
+        .try_get(field)
+        .map_err(|err| format!("read SSH host {field} failed: {err}"))?;
+    u64::try_from(value).map_err(|_| format!("read SSH host {field} failed: out of range"))
+}
+
+async fn query_registered_ssh_host(
+    connection: &mut SqliteConnection,
+    host_id: &str,
+) -> Result<Option<RegisteredSshHost>, String> {
+    let row = sqlx::query(
+        "SELECT host, port, username, config_alias, config_file, auth_mode, identity_file, \
+                credential_ref, jump_mode, jump_host_id, proxy_type, proxy_host, proxy_port, \
+                proxy_command, connect_timeout_sec, server_alive_interval_sec, \
+                server_alive_count_max, startup_script \
+         FROM ssh_hosts WHERE id = ?",
+    )
+    .bind(host_id)
+    .fetch_optional(connection)
+    .await
+    .map_err(|err| format!("query CLI-Manager SSH host failed: {err}"))?;
+    row.map(|row| {
+        Ok(RegisteredSshHost {
+            host: row
+                .try_get("host")
+                .map_err(|err| format!("read SSH host address failed: {err}"))?,
+            port: sqlite_u16(&row, "port")?,
+            username: row
+                .try_get("username")
+                .map_err(|err| format!("read SSH host username failed: {err}"))?,
+            config_alias: row
+                .try_get("config_alias")
+                .map_err(|err| format!("read SSH config alias failed: {err}"))?,
+            config_file: row
+                .try_get("config_file")
+                .map_err(|err| format!("read SSH config file failed: {err}"))?,
+            auth_mode: row
+                .try_get("auth_mode")
+                .map_err(|err| format!("read SSH authentication mode failed: {err}"))?,
+            identity_file: row
+                .try_get("identity_file")
+                .map_err(|err| format!("read SSH identity file failed: {err}"))?,
+            credential_ref: row
+                .try_get("credential_ref")
+                .map_err(|err| format!("read SSH credential reference failed: {err}"))?,
+            jump_mode: row
+                .try_get("jump_mode")
+                .map_err(|err| format!("read SSH jump mode failed: {err}"))?,
+            jump_host_id: row
+                .try_get("jump_host_id")
+                .map_err(|err| format!("read SSH jump host failed: {err}"))?,
+            proxy_type: row
+                .try_get("proxy_type")
+                .map_err(|err| format!("read SSH proxy type failed: {err}"))?,
+            proxy_host: row
+                .try_get("proxy_host")
+                .map_err(|err| format!("read SSH proxy host failed: {err}"))?,
+            proxy_port: sqlite_u16(&row, "proxy_port")?,
+            proxy_command: row
+                .try_get("proxy_command")
+                .map_err(|err| format!("read SSH proxy command failed: {err}"))?,
+            connect_timeout_sec: sqlite_u64(&row, "connect_timeout_sec")?,
+            server_alive_interval_sec: sqlite_u64(&row, "server_alive_interval_sec")?,
+            server_alive_count_max: sqlite_u32(&row, "server_alive_count_max")?,
+            startup_script: row
+                .try_get("startup_script")
+                .map_err(|err| format!("read SSH startup script failed: {err}"))?,
+        })
+    })
+    .transpose()
+}
+
+fn ssh_jump_target(host: &RegisteredSshHost) -> String {
+    if !host.config_alias.trim().is_empty() {
+        return host.config_alias.trim().to_string();
+    }
+    let address = host.host.trim();
+    if address.is_empty() {
+        return String::new();
+    }
+    let address = if address.contains(':') && !address.starts_with('[') {
+        format!("[{address}]")
+    } else {
+        address.to_string()
+    };
+    let user = if host.username.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}@", host.username.trim())
+    };
+    let port = if host.port == 0 || host.port == 22 {
+        String::new()
+    } else {
+        format!(":{}", host.port)
+    };
+    format!("{user}{address}{port}")
+}
+
+fn selected_ssh_jump_host_id<'a>(
+    jump_mode: &str,
+    jump_host_id: Option<&'a str>,
+    proxy_type: &str,
+) -> Result<Option<&'a str>, String> {
+    if matches!(proxy_type, "http" | "socks5" | "proxy_command") || jump_mode == "none" {
+        return Ok(None);
+    }
+    jump_host_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(Some)
+        .ok_or_else(|| "handoff_ssh_jump_host_missing".to_string())
+}
+
+fn parse_project_environment(raw: &str) -> HashMap<String, String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .map(|values| {
+            values
+                .into_iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn load_ssh_codex_launch(project: &RegisteredProject) -> Result<SshCodexLaunch, String> {
+    if project.environment_type != "ssh" {
+        return Err("handoff_ssh_project_required".to_string());
+    }
+    let host_id = project
+        .ssh_host_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "handoff_ssh_host_missing".to_string())?;
+    let database_path = crate::app_paths::db_path()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("create SSH host query runtime failed: {err}"))?;
+    let (host, jump_target) = runtime.block_on(async {
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .read_only(true)
+            .busy_timeout(Duration::from_secs(3));
+        let mut connection = SqliteConnection::connect_with(&options)
+            .await
+            .map_err(|err| format!("open CLI-Manager SSH database failed: {err}"))?;
+        let host = query_registered_ssh_host(&mut connection, host_id)
+            .await?
+            .ok_or_else(|| "handoff_ssh_host_missing".to_string())?;
+        let jump_target = match selected_ssh_jump_host_id(
+            &host.jump_mode,
+            host.jump_host_id.as_deref(),
+            &host.proxy_type,
+        )? {
+            Some(jump_host_id) => query_registered_ssh_host(&mut connection, jump_host_id)
+                .await?
+                .map(|jump_host| ssh_jump_target(&jump_host))
+                .filter(|target| !target.is_empty())
+                .ok_or_else(|| "handoff_ssh_jump_host_missing".to_string())?,
+            None => String::new(),
+        };
+        let _ = connection.close().await;
+        Ok::<_, String>((host, jump_target))
+    })?;
+    if matches!(host.auth_mode.as_str(), "password_prompt" | "interactive") {
+        return Err("handoff_ssh_interactive_auth_unsupported".to_string());
+    }
+    let mut environment_overrides = parse_project_environment(&project.env_vars);
+    if !project.cli_config_root.trim().is_empty() {
+        environment_overrides.insert(
+            "CODEX_HOME".to_string(),
+            project.cli_config_root.trim().to_string(),
+        );
+    }
+    let inherited_git_config_count = environment_overrides.get("GIT_CONFIG_COUNT").cloned();
+    for (key, value) in git_safe_directory_environment_for_value(
+        project.remote_path.trim(),
+        inherited_git_config_count.as_deref(),
+    ) {
+        environment_overrides.insert(key, value);
+    }
+    let transport = SshTransportSpec {
+        host: host.host,
+        port: host.port,
+        username: host.username,
+        config_alias: host.config_alias,
+        config_file: host.config_file,
+        auth_mode: host.auth_mode.clone(),
+        identity_file: if host.auth_mode == "identity_file" {
+            host.identity_file
+        } else {
+            String::new()
+        },
+        credential_ref: if host.auth_mode == "credential_ref" {
+            host.credential_ref
+        } else {
+            String::new()
+        },
+        jump_target,
+        proxy_type: host.proxy_type.clone(),
+        proxy_host: host.proxy_host,
+        proxy_port: host.proxy_port,
+        proxy_command: if host.proxy_type == "proxy_command" {
+            host.proxy_command
+        } else {
+            String::new()
+        },
+        connect_timeout_sec: host.connect_timeout_sec,
+        server_alive_interval_sec: host.server_alive_interval_sec,
+        server_alive_count_max: host.server_alive_count_max,
+    };
+    let launch = SshCodexLaunch {
+        transport,
+        remote_path: project.remote_path.trim().to_string(),
+        environment_overrides,
+        initialization_command: (!host.startup_script.trim().is_empty())
+            .then(|| host.startup_script.trim().to_string()),
+    };
+    launch.encode()?;
+    Ok(launch)
 }
 
 fn registered_project_by_token(
@@ -3230,6 +3582,13 @@ fn git_safe_directory_environment(
     project_path: &Path,
     inherited_count: Option<&str>,
 ) -> Vec<(String, String)> {
+    git_safe_directory_environment_for_value(&config_path_value(project_path), inherited_count)
+}
+
+fn git_safe_directory_environment_for_value(
+    project_path: &str,
+    inherited_count: Option<&str>,
+) -> Vec<(String, String)> {
     let index = inherited_count
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value < 1_024)
@@ -3242,7 +3601,7 @@ fn git_safe_directory_environment(
         ),
         (
             format!("GIT_CONFIG_VALUE_{index}"),
-            config_path_value(project_path),
+            project_path.to_string(),
         ),
     ]
 }
@@ -4101,7 +4460,7 @@ impl CcConnectManager {
             ));
         }
         let (profile, project) = handoff::effective_target_for_process(base_profile)?;
-        if profile.agent == CcConnectAgent::Codex {
+        if profile.agent == CcConnectAgent::Codex && project.environment_type != "ssh" {
             self.check_codex_app_server(true).map_err(|err| {
                 format!("Codex interactive approval backend is unavailable: {err}")
             })?;
@@ -4680,6 +5039,11 @@ mod tests {
             codex_provider_id: None,
             provider_name: None,
             provider_is_global: true,
+            environment_type: "local".to_string(),
+            ssh_host_id: None,
+            remote_path: String::new(),
+            cli_config_root: String::new(),
+            env_vars: "{}".to_string(),
         }
     }
 
@@ -4714,6 +5078,12 @@ mod tests {
             group_id: group_id.map(str::to_string),
             sort_order,
             provider_overrides: provider_overrides.to_string(),
+            environment_type: "local".to_string(),
+            ssh_host_id: None,
+            remote_path: String::new(),
+            cli_config_root: String::new(),
+            host_codex_config_root: String::new(),
+            env_vars: "{}".to_string(),
         }
     }
     #[test]
@@ -5026,6 +5396,46 @@ mod tests {
         );
         assert!(!environment.contains_key("GIT_CONFIG_KEY_0"));
     }
+
+    #[test]
+    fn remote_git_safe_directory_is_scoped_to_the_registered_posix_path() {
+        let environment = git_safe_directory_environment_for_value("/srv/project", Some("1"))
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            environment.get("GIT_CONFIG_COUNT").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            environment.get("GIT_CONFIG_KEY_1").map(String::as_str),
+            Some("safe.directory")
+        );
+        assert_eq!(
+            environment.get("GIT_CONFIG_VALUE_1").map(String::as_str),
+            Some("/srv/project")
+        );
+        assert!(!environment.contains_key("GIT_CONFIG_KEY_0"));
+    }
+
+    #[test]
+    fn ssh_handoff_jump_routing_fails_closed_when_the_host_is_missing() {
+        assert_eq!(
+            selected_ssh_jump_host_id("none", None, "none").unwrap(),
+            None
+        );
+        assert_eq!(
+            selected_ssh_jump_host_id("host", None, "none").unwrap_err(),
+            "handoff_ssh_jump_host_missing"
+        );
+        assert_eq!(
+            selected_ssh_jump_host_id("host", Some("  jump-1  "), "none").unwrap(),
+            Some("jump-1")
+        );
+        assert_eq!(
+            selected_ssh_jump_host_id("host", None, "socks5").unwrap(),
+            None
+        );
+    }
     #[cfg(target_os = "windows")]
     #[test]
     fn config_paths_strip_windows_extended_prefixes() {
@@ -5315,11 +5725,12 @@ allow_from = ""
         });
         RemoteCodexLaunch {
             wrapper_dir: PathBuf::from(r"C:\Users\test\.cli-manager\remote-manager\bin"),
-            launcher: PathBuf::from(r"D:\npm\codex.cmd"),
+            launcher: Some(PathBuf::from(r"D:\npm\codex.cmd")),
             proxy_executable: PathBuf::from(r"C:\Program Files\CLI-Manager\cli-manager.exe"),
             expected_session_id: Some("thread-original".to_string()),
-            codex_home: PathBuf::from(r"C:\Users\test\.codex"),
+            codex_home: Some(PathBuf::from(r"C:\Users\test\.codex")),
             provider,
+            ssh_launch: None,
         }
     }
 

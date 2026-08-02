@@ -107,6 +107,14 @@ function buildDesktopPetLabels(language: DesktopPetConfigPayload["language"]): D
     handedOff: translate(language, "desktopPet.actions.handedOff"),
     handoffRecoveryFailed: translate(language, "desktopPet.actions.handoffRecoveryFailed"),
     noHandoffSessions: translate(language, "desktopPet.actions.noHandoffSessions"),
+    handoffReady: translate(language, "desktopPet.actions.handoffReady"),
+    handoffResolveRemoteSession: translate(
+      language,
+      "desktopPet.actions.handoffResolveRemoteSession"
+    ),
+    handoffTaskRunning: translate(language, "desktopPet.actions.handoffTaskRunning"),
+    handoffStateUnknown: translate(language, "desktopPet.actions.handoffStateUnknown"),
+    handoffUnavailable: translate(language, "desktopPet.actions.handoffUnavailable"),
   };
 }
 
@@ -188,6 +196,17 @@ function targetStatusLabel(
             ? "error"
             : "idle";
   return moodLabel(labels, mood);
+}
+
+function handoffTargetStatusLabel(
+  labels: DesktopPetConfigPayload["labels"],
+  target: DesktopPetTarget
+): string {
+  if (target.handoffEligible) return labels.handoffReady;
+  if (target.handoffRecoverable) return labels.handoffResolveRemoteSession;
+  if (target.handoffReason === "task_running") return labels.handoffTaskRunning;
+  if (target.handoffReason === "task_state_unknown") return labels.handoffStateUnknown;
+  return labels.handoffUnavailable;
 }
 
 function platformLabel(
@@ -291,7 +310,7 @@ export default function DesktopPetApp() {
   const [previewSize, setPreviewSize] = useState<number | null>(null);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
   const menuTargets = targetMode === "handoff"
-    ? snapshot.targets.filter((target) => target.handoffEligible)
+    ? snapshot.targets.filter((target) => target.handoffCandidate)
     : snapshot.targets;
   const handoffPlatforms = useMemo(
     () => snapshot.handoffPlatforms.filter((platform) => platform.enabled),
@@ -596,7 +615,7 @@ export default function DesktopPetApp() {
       targetMode === "handoff"
       && (
         !selectedPlatform
-        || !snapshot.targets.some((target) => target.handoffEligible)
+        || !snapshot.targets.some((target) => target.handoffCandidate)
         || !handoffPlatforms.some(
           (platform) => platform.platform === selectedPlatform && platform.ready
         )
@@ -860,7 +879,7 @@ export default function DesktopPetApp() {
   };
 
   const requestHandoff = (target: DesktopPetTarget) => {
-    if (!selectedPlatform) return;
+    if (!selectedPlatform || (!target.handoffEligible && !target.handoffRecoverable)) return;
     closeMenu();
     void emitTo("main", DESKTOP_PET_HANDOFF_START_EVENT, {
       sessionId: target.sessionId,
@@ -1057,7 +1076,12 @@ export default function DesktopPetApp() {
               );
               const primary = identityLabels[0] || `${labels.unnamedTask} ${index + 1}`;
               const secondary = identityLabels[1] ?? null;
-              const status = targetStatusLabel(labels, target);
+              const status = targetMode === "handoff"
+                ? handoffTargetStatusLabel(labels, target)
+                : targetStatusLabel(labels, target);
+              const handoffDisabled = targetMode === "handoff"
+                && !target.handoffEligible
+                && !target.handoffRecoverable;
               return (
                 <button
                   key={target.sessionId}
@@ -1070,6 +1094,8 @@ export default function DesktopPetApp() {
                   data-recovery-failed={
                     target.handoffPhase === "recovery_failed" || undefined
                   }
+                  data-handoff-disabled={handoffDisabled || undefined}
+                  disabled={handoffDisabled}
                   aria-current={target.active ? "true" : undefined}
                   style={targetFanStyle(
                     index,
@@ -1119,7 +1145,7 @@ export default function DesktopPetApp() {
               disabled={
                 snapshot.handoffBusy
                 || Boolean(snapshot.handoff)
-                || !snapshot.targets.some((target) => target.handoffEligible)
+                || !snapshot.targets.some((target) => target.handoffCandidate)
                 || handoffPlatforms.length === 0
               }
               onClick={() => {

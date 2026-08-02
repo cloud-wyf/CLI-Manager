@@ -36,6 +36,14 @@ writeFileSync(
   "export const detectCliResumeKind = () => null;\n",
   "utf8",
 );
+writeFileSync(
+  join(tempDir, "cliTools.mjs"),
+  `export const resolveCliToolHistorySourceId = (tool) => {
+    const value = tool?.trim().toLowerCase();
+    return ["claude", "codex", "grok", "pi"].includes(value) ? value : null;
+  };\n`,
+  "utf8",
+);
 
 transpile(new URL("../src/lib/resumeCliArgs.ts", import.meta.url), "resumeCliArgs.mjs");
 transpile(new URL("../src/lib/providerSwitching.ts", import.meta.url), "providerSwitching.mjs");
@@ -56,15 +64,65 @@ const saveSessionPath = transpile(
     "./resumeCliArgs": "./resumeCliArgs.mjs",
   },
 );
+const historyResumeCommandPath = transpile(
+  new URL("../src/lib/historyResumeCommand.ts", import.meta.url),
+  "historyResumeCommand.mjs",
+  {
+    "./cliTools": "./cliTools.mjs",
+    "./projectStartupCommand": "./projectStartupCommand.mjs",
+  },
+);
 
-const { stripResumeCliArgs } = await import(
+const {
+  detectCodexLaunchSessionSelection,
+  extractCodexResumeSessionId,
+  stripResumeCliArgs,
+} = await import(
   pathToFileURL(join(tempDir, "resumeCliArgs.mjs")).href
 );
 const { appendResumeCliArgs } = await import(pathToFileURL(projectStartupPath).href);
 const { buildResumeCliArgs } = await import(pathToFileURL(saveSessionPath).href);
+const { buildHistoryResumeCommand, stripPiResumeCliArgs } = await import(
+  pathToFileURL(historyResumeCommandPath).href
+);
+const historySourcesPath = transpile(
+  new URL("../src/lib/historySources.ts", import.meta.url),
+  "historySources.mjs",
+);
+const { HISTORY_SOURCE_DESCRIPTOR_BY_ID } = await import(pathToFileURL(historySourcesPath).href);
 
 const OLD_ID = "019f2c9e-ed25-73e1-a883-86d578fc9e08";
 const NEW_ID = "019f5e8b-2d11-76d1-89b4-a0c0ff20d111";
+
+test("extracts an explicit Codex resume session id", () => {
+  const cases = [
+    [`codex resume ${OLD_ID}`, OLD_ID],
+    [`codex resume --no-alt-screen ${OLD_ID}`, OLD_ID],
+    [`codex resume --profile provider-a --model o3 ${OLD_ID}`, OLD_ID],
+    [`"C:\\tools\\codex.exe" resume "${OLD_ID}"`, OLD_ID],
+    ["codex resume --last", null],
+    ["codex resume --last continue", null],
+    [`claude resume ${OLD_ID}`, null],
+  ];
+
+  for (const [command, expected] of cases) {
+    assert.equal(extractCodexResumeSessionId(command), expected, command);
+  }
+});
+
+test("classifies Codex launch session selection modes", () => {
+  const cases = [
+    ["codex", { kind: "new" }],
+    [`codex resume --no-alt-screen ${OLD_ID}`, { kind: "explicit", sessionId: OLD_ID }],
+    ["codex resume --no-alt-screen --last", { kind: "last" }],
+    ["codex resume", { kind: "interactive" }],
+    [`claude resume ${OLD_ID}`, { kind: "new" }],
+  ];
+
+  for (const [command, expected] of cases) {
+    assert.deepEqual(detectCodexLaunchSessionSelection(command), expected, command);
+  }
+});
 
 test("strips supported Codex and Claude resume fragments", () => {
   const cases = [
@@ -162,4 +220,34 @@ test("saved-session CLI arguments reuse the same resume stripping rules", () => 
     buildResumeCliArgs("claude", "--continue --model sonnet", NEW_ID),
     `--model sonnet --resume ${NEW_ID}`,
   );
+});
+
+test("Pi history resume uses --session and strips every conflicting selector", () => {
+  const project = {
+    cli_tool: "pi",
+    cli_args: `--model sonnet -c old --continue=old -r old --resume old --session old --session-id=old --fork old --session-dir "F:/pi sessions"`,
+    startup_cmd: "",
+    provider_overrides: "{}",
+    shell: "powershell",
+  };
+
+  assert.equal(
+    buildHistoryResumeCommand({ source: "pi", session_id: NEW_ID }, project),
+    `pi --session ${NEW_ID} --model sonnet --session-dir "F:/pi sessions"`,
+  );
+  assert.equal(
+    stripPiResumeCliArgs("--model opus --session-dir custom --fork=old"),
+    "--model opus --session-dir custom",
+  );
+});
+
+test("existing Claude Codex and Grok history resume commands stay unchanged", () => {
+  assert.equal(buildHistoryResumeCommand({ source: "claude", session_id: NEW_ID }), `claude --resume ${NEW_ID}`);
+  assert.equal(buildHistoryResumeCommand({ source: "codex", session_id: NEW_ID }), `codex resume ${NEW_ID}`);
+  assert.equal(buildHistoryResumeCommand({ source: "grok", session_id: NEW_ID }), `grok --resume ${NEW_ID}`);
+  assert.equal(buildHistoryResumeCommand({ source: "pi", session_id: "bad id" }), null);
+});
+
+test("Pi history source advertises local resume support", () => {
+  assert.equal(HISTORY_SOURCE_DESCRIPTOR_BY_ID.get("pi")?.capabilities.resume, "supported");
 });

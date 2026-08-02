@@ -400,8 +400,8 @@
   pointer-events: none;
 }
 
-.desktop-pet-target:hover,
-.desktop-pet-target:focus-visible {
+.desktop-pet-target:not(:disabled):hover,
+.desktop-pet-target:not(:disabled):focus-visible {
   z-index: 100 !important;
   outline: none;
   border-color: color-mix(in srgb, var(--pet-accent) 58%, white 8%);
@@ -674,6 +674,12 @@
   padding: 0 28px 0 10px;
 }
 
+.desktop-pet-target:disabled {
+  cursor: default;
+  opacity: .52;
+  filter: saturate(.62);
+}
+
 .desktop-pet-root[data-menu-horizontal="right"][data-show-action-menu="false"] .desktop-pet-target-list {
   left: calc(var(--pet-anchor-width) - 20px);
 }
@@ -690,8 +696,8 @@
   transform: translateX(20px) rotate(0deg);
 }
 
-.desktop-pet-root[data-menu-horizontal="right"] .desktop-pet-target:hover,
-.desktop-pet-root[data-menu-horizontal="right"] .desktop-pet-target:focus-visible {
+.desktop-pet-root[data-menu-horizontal="right"] .desktop-pet-target:not(:disabled):hover,
+.desktop-pet-root[data-menu-horizontal="right"] .desktop-pet-target:not(:disabled):focus-visible {
   transform: translateX(26px) rotate(0deg) scale(1.02);
 }
 

@@ -29,6 +29,12 @@ type NormalizeTerminalOutput = (text: string) => string;
 type TransformTerminalOutput = (text: string) => string;
 type AfterTerminalWrite = (terminal: Terminal) => void;
 
+export interface TerminalOutputDiagnostics {
+  onFrame(frame: TerminalBinaryFrame, rawText: string, normalizedText: string): void;
+  onWriteCommitted(terminal: Terminal, writtenText: string): void;
+  reset(): void;
+}
+
 interface PendingTerminalWrite {
   text: string;
   charCount: number;
@@ -59,6 +65,7 @@ interface UseTerminalDisplayOptions {
   normalizeOutputRef: RefObject<NormalizeTerminalOutput>;
   transformOutputRef: RefObject<TransformTerminalOutput>;
   afterTerminalWriteRef: RefObject<AfterTerminalWrite | null>;
+  outputDiagnosticsRef?: RefObject<TerminalOutputDiagnostics | null>;
   onPtyOutputListenError: (err: unknown) => void;
   onViewportRefreshNeeded?: () => void;
 }
@@ -98,6 +105,7 @@ export function useTerminalDisplay({
   normalizeOutputRef,
   transformOutputRef,
   afterTerminalWriteRef,
+  outputDiagnosticsRef,
   onPtyOutputListenError,
   onViewportRefreshNeeded,
 }: UseTerminalDisplayOptions): UseTerminalDisplayResult {
@@ -284,6 +292,7 @@ export function useTerminalDisplay({
         if (first.replay && first.replayBatchEnd) finishReplayBatch();
       };
       if (first.reset) {
+        outputDiagnosticsRef?.current?.reset();
         terminal.reset();
         commitPending();
         schedulePendingWrite();
@@ -295,9 +304,11 @@ export function useTerminalDisplay({
         return;
       }
       ptyWriteInProgressRef.current = true;
-      terminal.write(transformOutputRef.current(combined), () => {
+      const transformed = transformOutputRef.current(combined);
+      terminal.write(transformed, () => {
         ptyWriteInProgressRef.current = false;
         if (cancelled || terminalRef.current !== terminal) return;
+        outputDiagnosticsRef?.current?.onWriteCommitted(terminal, transformed);
         handleTerminalWriteCommitted(terminal);
         commitPending();
         schedulePendingWrite();
@@ -307,6 +318,7 @@ export function useTerminalDisplay({
       const payload = delivery.frame;
       const rawText = textDecoder.decode(payload.data, { stream: true });
       const text = normalizeOutputRef.current(rawText);
+      outputDiagnosticsRef?.current?.onFrame(payload, rawText, text);
       if (!text && payload.kind !== "replay" && payload.kind !== "reset") {
         delivery.commit(rawText.length);
         return;
@@ -354,14 +366,18 @@ export function useTerminalDisplay({
           if (entry.cols > 0 && entry.rows > 0 && (terminal.cols !== entry.cols || terminal.rows !== entry.rows)) {
             terminal.resize(entry.cols, entry.rows);
           }
-          const text = normalizeOutputRef.current(textDecoder.decode(entry.data, { stream: true }));
+          const rawText = textDecoder.decode(entry.data, { stream: true });
+          const text = normalizeOutputRef.current(rawText);
+          outputDiagnosticsRef?.current?.onFrame(entry, rawText, text);
           if (!text) {
             terminalProcessManager.acknowledgeOutput(sessionId, entry.sequence, 0);
             continue;
           }
           await new Promise<void>((resolve) => {
-            terminal.write(transformOutputRef.current(text), () => {
+            const transformed = transformOutputRef.current(text);
+            terminal.write(transformed, () => {
               if (terminalRef.current === terminal) {
+                outputDiagnosticsRef?.current?.onWriteCommitted(terminal, transformed);
                 handleTerminalWriteCommitted(terminal);
                 terminalProcessManager.acknowledgeOutput(sessionId, entry.sequence, 0);
               }
@@ -460,6 +476,7 @@ export function useTerminalDisplay({
     ptyPendingChunksRef.current = [];
     ptyWriteInProgressRef.current = false;
     forwardPtyResizeRef.current = true;
+    outputDiagnosticsRef?.current?.reset();
   };
 
   const resizeTerminal = (terminal: Terminal, cols: number, rows: number) => {

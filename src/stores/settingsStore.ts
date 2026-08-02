@@ -33,6 +33,12 @@ import {
   recordCliArgsUsage,
   type CliArgsHistoryEntry,
 } from "../lib/cliArgsHistory";
+import type { GitDiffContextLines, GitDiffWhitespaceMode } from "../lib/gitDiffOptions";
+import {
+  DEFAULT_TERMINAL_PANE_MARKER_SETTINGS,
+  sanitizeTerminalPaneMarkerSettings,
+  type TerminalPaneMarkerSettings,
+} from "../lib/terminalPaneMarker";
 
 export {
   DESKTOP_PET_SIZE_DEFAULT_PERCENT,
@@ -65,6 +71,8 @@ export type DarkThemePalette =
 export type TerminalThemeMode = "system" | "independent";
 export type SidebarDensity = "compact" | "comfortable";
 export type ViewMode = "standard" | "compact";
+export type GitDiffViewMode = "split" | "unified";
+export type GitDiffOpenMode = "dialog" | "editor";
 export type CloseBehavior = "ask" | "minimize" | "exit";
 /** 退出时存在运行中任务的处理方式：询问 / 后台继续 / 最小化到托盘 / 丢弃任务并退出。 */
 export type ExitWithRunningTasksBehavior = "ask" | "background" | "minimize" | "discard";
@@ -110,7 +118,7 @@ export type SystemResourceCardKey =
   | "processes";
 export type TerminalPanelWidthKey = "merged" | "stats" | "git" | "replay" | "files" | "systemResources";
 export type TerminalPanelWidthSettings = Record<TerminalPanelWidthKey, number>;
-export type TerminalSettingsSectionKey = "behavior" | "shells" | "themes" | "background";
+export type TerminalSettingsSectionKey = "behavior" | "paneMarker" | "shells" | "themes" | "background";
 export type TerminalSettingsSectionsExpanded = Record<TerminalSettingsSectionKey, boolean>;
 export type HookSettingsSectionKey = "toast" | "notifications" | "claude" | "codex" | "pi" | "grok";
 export type HookSettingsSectionsExpanded = Record<HookSettingsSectionKey, boolean>;
@@ -134,12 +142,14 @@ export const TERMINAL_PANEL_WIDTH_DEFAULTS: TerminalPanelWidthSettings = {
 };
 export const TERMINAL_SETTINGS_SECTION_KEYS: readonly TerminalSettingsSectionKey[] = [
   "behavior",
+  "paneMarker",
   "shells",
   "themes",
   "background",
 ];
 export const TERMINAL_SETTINGS_SECTIONS_EXPANDED_DEFAULT: TerminalSettingsSectionsExpanded = {
   behavior: true,
+  paneMarker: false,
   shells: false,
   themes: false,
   background: false,
@@ -212,6 +222,8 @@ export type HookEventType =
   | "Stop"
   | "StopFailure"
   | "PermissionRequest";
+
+export type TaskbarAttentionMode = "finite" | "untilFocused";
 
 const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   "newTerminal",
@@ -331,6 +343,9 @@ export interface Settings {
   terminalScrollbackCustomEnabled: boolean;
   terminalScrollbackRows: number;
   fontFamily: string;
+  terminalTextColor: string;
+  terminalTuiUserColor: string;
+  terminalTuiAssistantColor: string;
   uiFontFamily: string;
   uiFontSize: number;
   uiTextColor: string;
@@ -384,6 +399,7 @@ export interface Settings {
   terminalShellProfiles: TerminalShellProfile[];
   /** 终端设置页各可折叠区块的展开状态记忆。 */
   terminalSettingsSectionsExpanded: TerminalSettingsSectionsExpanded;
+  terminalPaneMarker: TerminalPaneMarkerSettings;
   terminalInputSuggestionsEnabled: boolean;
   terminalInputSuggestionProvider: TerminalInputSuggestionProvider;
   terminalInputSuggestionLlmEnabled: boolean;
@@ -406,6 +422,9 @@ export interface Settings {
   systemNotificationsEnabled: boolean;
   suppressSystemNotificationsWhenFocused: boolean;
   systemNotificationEvents: Record<HookEventType, boolean>;
+  taskbarAttentionEnabled: boolean;
+  taskbarAttentionMode: TaskbarAttentionMode;
+  taskbarAttentionFlashCount: number;
   /** Hook 设置页各可折叠区块的展开状态记忆。 */
   hookSettingsSectionsExpanded: HookSettingsSectionsExpanded;
   thirdPartyHookNotificationsEnabled: boolean;
@@ -425,6 +444,16 @@ export interface Settings {
   ccSwitchDbPath: string | null;
   /** Git 变更树分组模式：directory（按目录树） / module（按顶层目录模块） */
   gitGroupBy: "directory" | "module";
+  /** Git Diff 显示模式：左右分栏或统一单栏。 */
+  gitDiffViewMode: GitDiffViewMode;
+  /** Git Diff 默认打开宿主：审阅弹框或文件编辑器。 */
+  gitDiffOpenMode: GitDiffOpenMode;
+  /** Git Diff 代码行是否自动换行。 */
+  gitDiffWrapLines: boolean;
+  /** Git Diff 空白比较模式。 */
+  gitDiffWhitespaceMode: GitDiffWhitespaceMode;
+  /** Git Diff 上下文行数。 */
+  gitDiffContextLines: GitDiffContextLines;
   confirmBeforeClosingTerminalTab: boolean;
   terminalTabHoverInfoEnabled: boolean;
   fileExplorerIgnoredPaths: FileExplorerIgnoredPaths;
@@ -461,6 +490,9 @@ const DEFAULTS: Settings = {
   terminalScrollbackCustomEnabled: false,
   terminalScrollbackRows: TERMINAL_SCROLLBACK_ROWS_DEFAULT,
   fontFamily: "Cascadia Code, Consolas, monospace",
+  terminalTextColor: "",
+  terminalTuiUserColor: "",
+  terminalTuiAssistantColor: "",
   uiFontFamily:
     "\"Segoe UI Variable\", \"Segoe UI\", -apple-system, BlinkMacSystemFont, \"PingFang SC\", \"Microsoft YaHei\", sans-serif",
   uiFontSize: UI_FONT_SIZE_DEFAULT,
@@ -549,6 +581,7 @@ const DEFAULTS: Settings = {
   },
   terminalShellProfiles: [],
   terminalSettingsSectionsExpanded: { ...TERMINAL_SETTINGS_SECTIONS_EXPANDED_DEFAULT },
+  terminalPaneMarker: { ...DEFAULT_TERMINAL_PANE_MARKER_SETTINGS },
   terminalInputSuggestionsEnabled: true,
   terminalInputSuggestionProvider: "local",
   terminalInputSuggestionLlmEnabled: false,
@@ -578,6 +611,9 @@ const DEFAULTS: Settings = {
     StopFailure: true,
     PermissionRequest: true,
   },
+  taskbarAttentionEnabled: true,
+  taskbarAttentionMode: "finite",
+  taskbarAttentionFlashCount: 5,
   hookSettingsSectionsExpanded: { ...HOOK_SETTINGS_SECTIONS_EXPANDED_DEFAULT },
   thirdPartyHookNotificationsEnabled: true,
   thirdPartyHookTargets: [],
@@ -594,6 +630,11 @@ const DEFAULTS: Settings = {
   grokHookConfigDir: null,
   ccSwitchDbPath: null,
   gitGroupBy: "directory",
+  gitDiffViewMode: "split",
+  gitDiffOpenMode: "dialog",
+  gitDiffWrapLines: true,
+  gitDiffWhitespaceMode: "exact",
+  gitDiffContextLines: 3,
   confirmBeforeClosingTerminalTab: false,
   terminalTabHoverInfoEnabled: true,
   fileExplorerIgnoredPaths: {},
@@ -699,6 +740,18 @@ function migrateSystemNotificationEvents(value: unknown): Record<HookEventType, 
     }
   }
   return result;
+}
+
+function migrateTaskbarAttentionMode(value: unknown): TaskbarAttentionMode {
+  return value === "finite" || value === "untilFocused"
+    ? value
+    : DEFAULTS.taskbarAttentionMode;
+}
+
+function migrateTaskbarAttentionFlashCount(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 20
+    ? value
+    : DEFAULTS.taskbarAttentionFlashCount;
 }
 
 function migrateLastSettingsTab(value: unknown): LastSettingsTab {
@@ -1170,6 +1223,36 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       entries.uiTextColor = DEFAULTS.uiTextColor;
       persistSetting("uiTextColor", DEFAULTS.uiTextColor);
     }
+    const storedTerminalTextColor = entries.terminalTextColor;
+    const terminalTextColor =
+      typeof storedTerminalTextColor === "string" &&
+      (storedTerminalTextColor === "" || HEX_COLOR_PATTERN.test(storedTerminalTextColor))
+        ? storedTerminalTextColor
+        : DEFAULTS.terminalTextColor;
+    entries.terminalTextColor = terminalTextColor;
+    if (storedTerminalTextColor !== undefined && storedTerminalTextColor !== terminalTextColor) {
+      persistSetting("terminalTextColor", terminalTextColor);
+    }
+    const storedTerminalTuiUserColor = entries.terminalTuiUserColor;
+    const terminalTuiUserColor =
+      typeof storedTerminalTuiUserColor === "string" &&
+      (storedTerminalTuiUserColor === "" || HEX_COLOR_PATTERN.test(storedTerminalTuiUserColor))
+        ? storedTerminalTuiUserColor
+        : DEFAULTS.terminalTuiUserColor;
+    entries.terminalTuiUserColor = terminalTuiUserColor;
+    if (storedTerminalTuiUserColor !== undefined && storedTerminalTuiUserColor !== terminalTuiUserColor) {
+      persistSetting("terminalTuiUserColor", terminalTuiUserColor);
+    }
+    const storedTerminalTuiAssistantColor = entries.terminalTuiAssistantColor;
+    const terminalTuiAssistantColor =
+      typeof storedTerminalTuiAssistantColor === "string" &&
+      (storedTerminalTuiAssistantColor === "" || HEX_COLOR_PATTERN.test(storedTerminalTuiAssistantColor))
+        ? storedTerminalTuiAssistantColor
+        : DEFAULTS.terminalTuiAssistantColor;
+    entries.terminalTuiAssistantColor = terminalTuiAssistantColor;
+    if (storedTerminalTuiAssistantColor !== undefined && storedTerminalTuiAssistantColor !== terminalTuiAssistantColor) {
+      persistSetting("terminalTuiAssistantColor", terminalTuiAssistantColor);
+    }
     entries.fontFamily =
       typeof entries.fontFamily === "string" && entries.fontFamily.trim()
         ? entries.fontFamily
@@ -1233,6 +1316,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     entries.terminalSettingsSectionsExpanded = migrateTerminalSettingsSectionsExpanded(
       entries.terminalSettingsSectionsExpanded
     );
+    entries.terminalPaneMarker = sanitizeTerminalPaneMarkerSettings(entries.terminalPaneMarker);
 
     const currentDefaultShell = typeof entries.defaultShell === "string" ? entries.defaultShell.trim() : "";
     entries.defaultShell = currentDefaultShell || DEFAULTS.defaultShell;
@@ -1398,6 +1482,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         ? entries.suppressSystemNotificationsWhenFocused
         : DEFAULTS.suppressSystemNotificationsWhenFocused;
     entries.systemNotificationEvents = migrateSystemNotificationEvents(entries.systemNotificationEvents);
+    entries.taskbarAttentionEnabled =
+      typeof entries.taskbarAttentionEnabled === "boolean"
+        ? entries.taskbarAttentionEnabled
+        : DEFAULTS.taskbarAttentionEnabled;
+    entries.taskbarAttentionMode = migrateTaskbarAttentionMode(entries.taskbarAttentionMode);
+    entries.taskbarAttentionFlashCount = migrateTaskbarAttentionFlashCount(entries.taskbarAttentionFlashCount);
     entries.hookSettingsSectionsExpanded = migrateHookSettingsSectionsExpanded(entries.hookSettingsSectionsExpanded);
     entries.thirdPartyHookNotificationsEnabled =
       typeof entries.thirdPartyHookNotificationsEnabled === "boolean"
@@ -1465,6 +1555,30 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       entries.gitGroupBy === "directory" || entries.gitGroupBy === "module"
         ? entries.gitGroupBy
         : DEFAULTS.gitGroupBy;
+    entries.gitDiffViewMode =
+      entries.gitDiffViewMode === "split" || entries.gitDiffViewMode === "unified"
+        ? entries.gitDiffViewMode
+        : DEFAULTS.gitDiffViewMode;
+    entries.gitDiffOpenMode =
+      entries.gitDiffOpenMode === "dialog" || entries.gitDiffOpenMode === "editor"
+        ? entries.gitDiffOpenMode
+        : DEFAULTS.gitDiffOpenMode;
+    entries.gitDiffWrapLines =
+      typeof entries.gitDiffWrapLines === "boolean"
+        ? entries.gitDiffWrapLines
+        : DEFAULTS.gitDiffWrapLines;
+    entries.gitDiffWhitespaceMode =
+      entries.gitDiffWhitespaceMode === "exact"
+      || entries.gitDiffWhitespaceMode === "ignore-eol"
+      || entries.gitDiffWhitespaceMode === "ignore-all"
+        ? entries.gitDiffWhitespaceMode
+        : DEFAULTS.gitDiffWhitespaceMode;
+    entries.gitDiffContextLines =
+      entries.gitDiffContextLines === 3
+      || entries.gitDiffContextLines === 10
+      || entries.gitDiffContextLines === 20
+        ? entries.gitDiffContextLines
+        : DEFAULTS.gitDiffContextLines;
     entries.fileExplorerIgnoredPaths = migrateFileExplorerIgnoredPaths(entries.fileExplorerIgnoredPaths);
     entries.batchLaunchGroupInPane =
       typeof entries.batchLaunchGroupInPane === "boolean"

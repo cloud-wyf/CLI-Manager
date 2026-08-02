@@ -34,6 +34,10 @@ import {
 } from "../../lib/fileExplorerIgnore";
 import type { GitFileChange, ProjectFileContentMatch, ProjectFileEntry, ProjectFileSearchMode } from "../../lib/types";
 import { isDefaultCollapsedDirectoryName, useFileExplorerStore } from "../../stores/fileExplorerStore";
+import {
+  createGitDiffWorkspaceContext,
+  useGitDiffWorkspaceStore,
+} from "../../stores/gitDiffWorkspaceStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTerminalStore } from "../../stores/terminalStore";
 import { STATUS_CONFIG } from "../git/GitStatusIcon";
@@ -510,11 +514,10 @@ function FileNode({
     return (
       <div>
         <div
-          className="ui-file-tooltip ui-file-tree-row flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-[12px]"
+          className="ui-file-tree-row flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-[12px]"
           data-selected={activePath === displayEntry.path ? "true" : "false"}
           data-file-tree-path={displayEntry.path}
           style={{ paddingLeft }}
-          data-tooltip={displayEntry.path}
         >
           <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-text-muted">
             {isDir ? (
@@ -540,13 +543,12 @@ function FileNode({
           <div
             role="button"
             tabIndex={0}
-            className="ui-file-tooltip ui-file-tree-row flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-[12px]"
+            className="ui-file-tree-row flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-[12px]"
             data-selected={activePath === displayEntry.path ? "true" : "false"}
             data-file-tree-path={displayEntry.path}
             data-file-drop-target-path={displayEntry.kind === "directory" ? displayEntry.path : parentPath(displayEntry.path)}
             draggable={false}
             style={{ paddingLeft }}
-            data-tooltip={displayStatus ? `${displayEntry.path} · ${displayStatus.label}` : displayEntry.path}
             onContextMenu={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
               onFileKeyDown(event, displayEntry);
@@ -822,7 +824,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
   const setSearchMode = useFileExplorerStore((s) => s.setSearchMode);
   const setSearchQuery = useFileExplorerStore((s) => s.setSearchQuery);
   const openFile = useFileExplorerStore((s) => s.openFile);
-  const openDiff = useFileExplorerStore((s) => s.openDiff);
+  const openDiff = useGitDiffWorkspaceStore((s) => s.openTab);
   const openFileAtSearchMatch = useFileExplorerStore((s) => s.openFileAtSearchMatch);
   const openFileEditorPane = useTerminalStore((s) => s.openFileEditorPane);
   const createEntry = useFileExplorerStore((s) => s.createEntry);
@@ -1435,8 +1437,18 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
   };
 
   const requestOpenDiff = useCallback((change: GitFileChange) => {
-    openDiff(change);
-    if (project) openFileEditorPane(project);
+    if (!project) return;
+    openDiff(createGitDiffWorkspaceContext(project), {
+      repositoryId: project.environment_type === "ssh" ? "" : project.path,
+      repositoryRelativePath: "",
+      filePath: change.path,
+      sourcePath: change.path,
+      fileName: change.path.split(/[/\\]/).pop() ?? change.path,
+      status: change.status,
+      additions: change.added,
+      deletions: change.deleted,
+    });
+    openFileEditorPane(project);
   }, [openDiff, openFileEditorPane, project]);
 
   const renderContentSearchRow = useCallback((match: ProjectFileContentMatch) => {
@@ -1446,14 +1458,13 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
         <ContextMenuTrigger asChild>
           <button
             type="button"
-            className="ui-file-tooltip ui-file-tree-row flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-[12px]"
+            className="ui-file-tree-row flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-[12px]"
             data-selected={activeFile?.path === match.path ? "true" : "false"}
             onContextMenu={(event) => event.stopPropagation()}
             onClick={() => {
               void openFileAtSearchMatch(match);
               openFileEditorPane(project);
             }}
-            data-tooltip={`${match.path}:${match.lineNumber}`}
           >
             <FileCode size={15} className="mt-0.5 shrink-0 text-text-muted" />
             <span className="min-w-0 flex-1">
@@ -1500,9 +1511,8 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
       return (
         <div
           key={entry.path}
-          className="ui-file-tooltip ui-file-tree-row flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px]"
+          className="ui-file-tree-row flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px]"
           data-selected={activeFile?.path === entry.path ? "true" : "false"}
-          data-tooltip={entry.path}
         >
           <img src={entry.kind === "directory" ? getMaterialFolderIcon(entry.name, false) : getMaterialFileIcon(entry.name)} alt="" width={16} height={16} />
           <InlineRenameInput
@@ -1519,7 +1529,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           <div
             role="button"
             tabIndex={0}
-            className="ui-file-tooltip ui-file-tree-row flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px]"
+            className="ui-file-tree-row flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px]"
             data-selected={activeFile?.path === entry.path ? "true" : "false"}
             data-file-drop-target-path={getDropTargetPath(entry)}
             draggable={false}
@@ -1544,7 +1554,6 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
             onPointerMove={handleFilePointerMove}
             onPointerUp={handleFilePointerUp}
             onPointerCancel={handleFilePointerCancel}
-            data-tooltip={displayStatus ? `${entry.path} · ${displayStatus.label}` : entry.path}
           >
             <img src={entry.kind === "directory" ? getMaterialFolderIcon(entry.name, false) : getMaterialFileIcon(entry.name)} alt="" width={16} height={16} draggable={false} />
             <span
@@ -1725,7 +1734,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           <span className="flex shrink-0" onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
             <Folder size={15} className="ui-file-explorer-root-icon" />
           </span>
-          <div className="ui-file-tooltip min-w-0 flex-1" data-tooltip={readOnly ? project.remote_path : project.path} onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
+          <div className="min-w-0 flex-1" onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
             <div className="ui-file-explorer-title truncate text-xs font-semibold">{project.name}</div>
             <div className="ui-file-explorer-subtitle truncate text-[10px]">{displayPathName}</div>
           </div>

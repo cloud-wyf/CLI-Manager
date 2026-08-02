@@ -1,12 +1,18 @@
 #[cfg(target_os = "windows")]
 use crate::shell_resolver::silent_command;
-use serde::Deserialize;
+use crate::ssh_transport::{
+    format_remote_home_path, posix_quote, validate_remote_home_path, SshOneShotOptions,
+    SshTransportLaunch, SshTransportSpec,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 pub const HELPER_SUBCOMMAND: &str = "__codex_app_server_proxy";
@@ -17,12 +23,14 @@ pub(crate) const CODEX_BASE_URL_OVERRIDE_ENV: &str = "CLI_MANAGER_CODEX_BASE_URL
 pub(crate) const CODEX_ENV_KEY_OVERRIDE_ENV: &str = "CLI_MANAGER_CODEX_ENV_KEY_OVERRIDE";
 pub(crate) const CODEX_MODEL_OVERRIDE_ENV: &str = "CLI_MANAGER_CODEX_MODEL_OVERRIDE";
 pub(crate) const CODEX_WIRE_API_OVERRIDE_ENV: &str = "CLI_MANAGER_CODEX_WIRE_API_OVERRIDE";
+pub(crate) const CODEX_SSH_LAUNCH_ENV: &str = "CLI_MANAGER_CODEX_SSH_LAUNCH";
 pub(crate) const CODEX_REMOTE_PROVIDER_NAME: &str = "cli_manager_remote";
 
 // A resumed Codex thread can legitimately exceed cc-connect's 10 MB scanner limit.
 // Keep a finite ceiling so a broken child cannot exhaust the host process indefinitely.
 const MAX_PROTOCOL_LINE_BYTES: usize = 512 * 1024 * 1024;
 const STRICT_RESUME_ERROR_CODE: i64 = -32091;
+const SSH_HANDOFF_HOOK_QUEUE_CAPACITY: usize = 32;
 
 #[derive(Debug, Deserialize)]
 struct RpcProbe {
@@ -77,8 +85,154 @@ struct PendingResume {
 }
 
 enum ClientLineAction {
-    Forward,
+    Forward(Vec<u8>),
     Reject(Vec<u8>),
+}
+
+struct SshHandoffHookForwarder {
+    sender: SyncSender<Value>,
+    tab_id: String,
+    expected_thread_id: Option<String>,
+}
+
+impl SshHandoffHookForwarder {
+    fn from_environment(expected_thread_id: Option<String>) -> Option<Self> {
+        let tab_id = env::var("CLI_MANAGER_TAB_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let (sender, receiver) = sync_channel::<Value>(SSH_HANDOFF_HOOK_QUEUE_CAPACITY);
+        std::thread::spawn(move || {
+            while let Ok(payload) = receiver.recv() {
+                let _ = crate::hook_client::try_notify_prepared_payload(&payload);
+            }
+        });
+        Some(Self {
+            sender,
+            tab_id,
+            expected_thread_id,
+        })
+    }
+
+    fn inspect_server_line(&self, line: &[u8]) {
+        let Some(payload) =
+            ssh_handoff_hook_payload(line, &self.tab_id, self.expected_thread_id.as_deref())
+        else {
+            return;
+        };
+        match self.sender.try_send(payload) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SshCodexLaunch {
+    pub(crate) transport: SshTransportSpec,
+    pub(crate) remote_path: String,
+    #[serde(default)]
+    pub(crate) environment_overrides: HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) initialization_command: Option<String>,
+}
+
+impl SshCodexLaunch {
+    pub(crate) fn encode(&self) -> Result<String, String> {
+        self.validate()?;
+        let payload = serde_json::to_vec(self)
+            .map_err(|err| format!("serialize SSH Codex launch failed: {err}"))?;
+        Ok(BASE64_STANDARD.encode(payload))
+    }
+
+    fn from_environment() -> Result<Option<Self>, String> {
+        let Some(encoded) = optional_unicode_env(CODEX_SSH_LAUNCH_ENV)? else {
+            return Ok(None);
+        };
+        let payload = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|err| format!("decode SSH Codex launch failed: {err}"))?;
+        let launch: Self = serde_json::from_slice(&payload)
+            .map_err(|err| format!("parse SSH Codex launch failed: {err}"))?;
+        launch.validate()?;
+        Ok(Some(launch))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        self.transport.validate()?;
+        validate_remote_work_dir(&self.remote_path)?;
+        if matches!(
+            self.transport.auth_mode.as_str(),
+            "password_prompt" | "interactive"
+        ) {
+            return Err("handoff_ssh_interactive_auth_unsupported".to_string());
+        }
+        if self
+            .environment_overrides
+            .keys()
+            .any(|key| !is_valid_environment_key(key))
+        {
+            return Err("ssh_environment_key_invalid".to_string());
+        }
+        if self
+            .environment_overrides
+            .values()
+            .any(|value| value.contains('\0'))
+        {
+            return Err("ssh_environment_value_invalid".to_string());
+        }
+        if let Some(codex_home) = self.environment_overrides.get("CODEX_HOME") {
+            validate_remote_home_path(codex_home)
+                .map_err(|_| "ssh_tool_config_root_invalid".to_string())?;
+        }
+        if self
+            .initialization_command
+            .as_deref()
+            .is_some_and(|command| command.contains('\0'))
+        {
+            return Err("ssh_startup_command_invalid".to_string());
+        }
+        Ok(())
+    }
+
+    fn build_launch(&self, args: &[String]) -> Result<SshTransportLaunch, String> {
+        self.validate()?;
+        self.transport
+            .build_one_shot_launch(self.remote_command(args), SshOneShotOptions::default())
+    }
+
+    fn remote_command(&self, args: &[String]) -> String {
+        let mut commands = Vec::new();
+        if let Some(command) = self
+            .initialization_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        {
+            commands.push(command.to_string());
+        }
+        let mut environment = self.environment_overrides.iter().collect::<Vec<_>>();
+        environment.sort_by(|left, right| left.0.cmp(right.0));
+        commands.extend(environment.into_iter().map(|(key, value)| {
+            let value = if key == "CODEX_HOME" {
+                format_remote_home_path(value)
+            } else {
+                posix_quote(value)
+            };
+            format!("export {key}={value}")
+        }));
+        let invocation = std::iter::once("codex".to_string())
+            .chain(args.iter().cloned())
+            .map(|argument| posix_quote(&argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        commands.push(format!("exec {invocation} 1>&3 3>&-"));
+        format!(
+            "cd -- {} && exec 3>&1 && exec \"${{SHELL:-/bin/sh}}\" -lic {} 1>&2",
+            posix_quote(self.remote_path.trim()),
+            posix_quote(&commands.join("\n"))
+        )
+    }
 }
 
 pub fn is_helper_request(args: &[String]) -> bool {
@@ -121,15 +275,19 @@ fn run_proxy(child_args: &[String]) -> Result<i32, String> {
         return Err("refusing to proxy a non app-server Codex command".to_string());
     }
 
-    let launcher = codex_launcher_from_environment()?;
+    let ssh_launch = SshCodexLaunch::from_environment()?;
     let expected_thread_id = env::var(EXPECTED_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let child_args =
-        build_codex_child_args(child_args, &CodexProviderOverrides::from_environment()?)?;
-
-    let mut command = codex_command(&launcher, &child_args);
+    let mut command = if let Some(ssh_launch) = ssh_launch.as_ref() {
+        command_from_ssh_launch(ssh_launch.build_launch(child_args)?)
+    } else {
+        let launcher = codex_launcher_from_environment()?;
+        let child_args =
+            build_codex_child_args(child_args, &CodexProviderOverrides::from_environment()?)?;
+        codex_command(&launcher, &child_args)
+    };
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -150,10 +308,15 @@ fn run_proxy(child_args: &[String]) -> Result<i32, String> {
     let parent_output = Arc::new(Mutex::new(io::stdout()));
     let input_pending = Arc::clone(&pending);
     let input_output = Arc::clone(&parent_output);
+    let hook_forwarder = ssh_launch
+        .as_ref()
+        .and_then(|_| SshHandoffHookForwarder::from_environment(expected_thread_id.clone()));
+    let remote_work_dir = ssh_launch.as_ref().map(|launch| launch.remote_path.clone());
     std::thread::spawn(move || {
         if let Err(err) = forward_parent_input(
             child_stdin,
             expected_thread_id.as_deref(),
+            remote_work_dir.as_deref(),
             &input_pending,
             &input_output,
         ) {
@@ -161,7 +324,12 @@ fn run_proxy(child_args: &[String]) -> Result<i32, String> {
         }
     });
 
-    if let Err(err) = forward_child_output(child_stdout, &pending, &parent_output) {
+    if let Err(err) = forward_child_output(
+        child_stdout,
+        &pending,
+        &parent_output,
+        hook_forwarder.as_ref(),
+    ) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(err);
@@ -177,6 +345,12 @@ fn is_app_server_command(child_args: &[String]) -> bool {
 }
 
 fn run_passthrough(child_args: &[String]) -> Result<i32, String> {
+    if let Some(ssh_launch) = SshCodexLaunch::from_environment()? {
+        let status = command_from_ssh_launch(ssh_launch.build_launch(child_args)?)
+            .status()
+            .map_err(|err| format!("start remote Codex command failed: {err}"))?;
+        return Ok(status.code().unwrap_or(1));
+    }
     let launcher = codex_launcher_from_environment()?;
     let child_args =
         build_codex_child_args(child_args, &CodexProviderOverrides::from_environment()?)?;
@@ -184,6 +358,37 @@ fn run_passthrough(child_args: &[String]) -> Result<i32, String> {
         .status()
         .map_err(|err| format!("start real Codex command failed: {err}"))?;
     Ok(status.code().unwrap_or(1))
+}
+
+fn validate_remote_work_dir(path: &str) -> Result<(), String> {
+    let path = path.trim();
+    if !path.starts_with('/') || path.contains(['\0', '\r', '\n', '\\']) {
+        return Err("ssh_remote_path_invalid".to_string());
+    }
+    if path.split('/').any(|part| part == "..") {
+        return Err("ssh_remote_path_parent_forbidden".to_string());
+    }
+    Ok(())
+}
+
+fn is_valid_environment_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && chars.all(|character| matches!(character, '_' | 'A'..='Z' | 'a'..='z' | '0'..='9'))
+}
+
+#[cfg(target_os = "windows")]
+fn command_from_ssh_launch(launch: SshTransportLaunch) -> Command {
+    let mut command = silent_command(&launch.executable);
+    command.args(launch.args).envs(launch.env);
+    command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn command_from_ssh_launch(launch: SshTransportLaunch) -> Command {
+    let mut command = Command::new(&launch.executable);
+    command.args(launch.args).envs(launch.env);
+    command
 }
 
 fn codex_launcher_from_environment() -> Result<PathBuf, String> {
@@ -297,6 +502,7 @@ fn codex_command(launcher: &Path, args: &[String]) -> Command {
 fn forward_parent_input(
     mut child_stdin: impl Write,
     expected_thread_id: Option<&str>,
+    remote_work_dir: Option<&str>,
     pending: &Arc<Mutex<HashMap<String, PendingResume>>>,
     parent_output: &Arc<Mutex<io::Stdout>>,
 ) -> Result<(), String> {
@@ -309,10 +515,10 @@ fn forward_parent_input(
             let mut pending = pending
                 .lock()
                 .map_err(|_| "resume request state lock poisoned".to_string())?;
-            inspect_client_line(&line, expected_thread_id, &mut pending)
+            inspect_client_line(&line, expected_thread_id, remote_work_dir, &mut pending)
         };
         match action {
-            ClientLineAction::Forward => {
+            ClientLineAction::Forward(line) => {
                 child_stdin
                     .write_all(&line)
                     .and_then(|_| child_stdin.flush())
@@ -330,11 +536,15 @@ fn forward_child_output(
     child_stdout: impl io::Read,
     pending: &Arc<Mutex<HashMap<String, PendingResume>>>,
     parent_output: &Arc<Mutex<io::Stdout>>,
+    hook_forwarder: Option<&SshHandoffHookForwarder>,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(child_stdout);
     while let Some(line) = read_protocol_line(&mut reader, MAX_PROTOCOL_LINE_BYTES)
         .map_err(|err| format!("read real Codex response failed: {err}"))?
     {
+        if let Some(forwarder) = hook_forwarder {
+            forwarder.inspect_server_line(&line);
+        }
         let transformed = {
             let mut pending = pending
                 .lock()
@@ -349,31 +559,34 @@ fn forward_child_output(
 fn inspect_client_line(
     line: &[u8],
     expected_thread_id: Option<&str>,
+    remote_work_dir: Option<&str>,
     pending: &mut HashMap<String, PendingResume>,
 ) -> ClientLineAction {
-    let Ok(message) = serde_json::from_slice::<Value>(trim_line_ending(line)) else {
-        return ClientLineAction::Forward;
+    let Ok(mut message) = serde_json::from_slice::<Value>(trim_line_ending(line)) else {
+        return ClientLineAction::Forward(line.to_vec());
     };
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return ClientLineAction::Forward;
+        return ClientLineAction::Forward(line.to_vec());
     };
+    let method = method.to_string();
     let Some(id) = message.get("id") else {
-        return ClientLineAction::Forward;
+        return ClientLineAction::Forward(line.to_vec());
     };
+    let id = id.clone();
 
     if method == "thread/start" {
         if let Some(expected) = expected_thread_id {
             return ClientLineAction::Reject(rpc_error_response(
-                id,
+                &id,
                 format!(
                     "CLI-Manager blocked a fresh thread because remote handoff requires session {expected}"
                 ),
             ));
         }
-        return ClientLineAction::Forward;
+        return ClientLineAction::Forward(line.to_vec());
     }
     if method != "thread/resume" {
-        return ClientLineAction::Forward;
+        return ClientLineAction::Forward(line.to_vec());
     }
 
     let requested_thread_id = message
@@ -385,7 +598,7 @@ fn inspect_client_line(
     if let Some(expected) = expected_thread_id {
         if requested_thread_id != expected {
             return ClientLineAction::Reject(rpc_error_response(
-                id,
+                &id,
                 format!(
                     "CLI-Manager detected Codex session drift: expected {expected}, received {}",
                     if requested_thread_id.is_empty() {
@@ -397,7 +610,19 @@ fn inspect_client_line(
             ));
         }
     }
-    if let Some(key) = rpc_id_key(id) {
+    if let Some(remote_work_dir) = remote_work_dir {
+        let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) else {
+            return ClientLineAction::Reject(rpc_error_response(
+                &id,
+                "CLI-Manager received an invalid Codex resume request".to_string(),
+            ));
+        };
+        params.insert(
+            "cwd".to_string(),
+            Value::String(remote_work_dir.to_string()),
+        );
+    }
+    if let Some(key) = rpc_id_key(&id) {
         pending.insert(
             key,
             PendingResume {
@@ -406,7 +631,74 @@ fn inspect_client_line(
             },
         );
     }
-    ClientLineAction::Forward
+    if remote_work_dir.is_some() {
+        ClientLineAction::Forward(json_line(&message))
+    } else {
+        ClientLineAction::Forward(line.to_vec())
+    }
+}
+
+fn ssh_handoff_hook_payload(
+    line: &[u8],
+    tab_id: &str,
+    expected_thread_id: Option<&str>,
+) -> Option<Value> {
+    let message = serde_json::from_slice::<Value>(trim_line_ending(line)).ok()?;
+    let method = message.get("method").and_then(Value::as_str)?;
+    let params = message.get("params").and_then(Value::as_object)?;
+    let session_id = params
+        .get("threadId")
+        .or_else(|| params.get("conversationId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(expected_thread_id)?;
+    if expected_thread_id.is_some_and(|expected| session_id != expected) {
+        return None;
+    }
+
+    let event = match method {
+        "turn/started" => "UserPromptSubmit",
+        "turn/completed" => match params
+            .get("turn")
+            .and_then(Value::as_object)
+            .and_then(|turn| turn.get("status"))
+            .and_then(Value::as_str)
+        {
+            Some("failed") => "StopFailure",
+            Some("completed" | "interrupted") => "Stop",
+            _ => return None,
+        },
+        "error"
+            if !params
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            "StopFailure"
+        }
+        "item/commandExecution/requestApproval"
+        | "item/fileChange/requestApproval"
+        | "item/permissions/requestApproval"
+        | "item/tool/requestUserInput"
+        | "mcpServer/elicitation/request"
+        | "applyPatchApproval"
+        | "execCommandApproval" => "PermissionRequest",
+        _ => return None,
+    };
+    let tool_use_id = params
+        .get("itemId")
+        .or_else(|| params.get("approvalId"))
+        .and_then(Value::as_str);
+    Some(json!({
+        "tabId": tab_id,
+        "source": "codex",
+        "event": event,
+        "sessionId": session_id,
+        "toolUseId": tool_use_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "remoteEventId": uuid::Uuid::new_v4().to_string(),
+    }))
 }
 
 fn transform_server_line(
@@ -564,6 +856,52 @@ fn write_parent_line(output: &Arc<Mutex<io::Stdout>>, line: &[u8]) -> Result<(),
 mod tests {
     use super::*;
 
+    fn ssh_transport(auth_mode: &str) -> SshTransportSpec {
+        SshTransportSpec {
+            host: "example.com".to_string(),
+            port: 22,
+            username: "dev".to_string(),
+            config_alias: String::new(),
+            config_file: String::new(),
+            auth_mode: auth_mode.to_string(),
+            identity_file: if auth_mode == "identity_file" {
+                "/home/dev/.ssh/id ed25519".to_string()
+            } else {
+                String::new()
+            },
+            credential_ref: if auth_mode == "credential_ref" {
+                "cli-manager:ssh:host-1".to_string()
+            } else {
+                String::new()
+            },
+            jump_target: String::new(),
+            proxy_type: "none".to_string(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_command: String::new(),
+            connect_timeout_sec: 10,
+            server_alive_interval_sec: 30,
+            server_alive_count_max: 3,
+        }
+    }
+
+    fn ssh_codex_launch(auth_mode: &str) -> SshCodexLaunch {
+        SshCodexLaunch {
+            transport: ssh_transport(auth_mode),
+            remote_path: "/srv/project dir".to_string(),
+            environment_overrides: HashMap::from([
+                ("CODEX_HOME".to_string(), "~/codex config".to_string()),
+                ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+                ("GIT_CONFIG_KEY_0".to_string(), "safe.directory".to_string()),
+                (
+                    "GIT_CONFIG_VALUE_0".to_string(),
+                    "/srv/project dir".to_string(),
+                ),
+            ]),
+            initialization_command: Some("source ~/.profile".to_string()),
+        }
+    }
+
     #[test]
     fn provider_overrides_are_inserted_before_app_server_without_secrets() {
         let args = build_codex_child_args(
@@ -688,7 +1026,7 @@ mod tests {
         let drifted = br#"{"jsonrpc":"2.0","id":3,"method":"thread/resume","params":{"threadId":"thread-new"}}
 "#;
         let ClientLineAction::Reject(response) =
-            inspect_client_line(drifted, Some("thread-original"), &mut pending)
+            inspect_client_line(drifted, Some("thread-original"), None, &mut pending)
         else {
             panic!("drifted resume must be rejected");
         };
@@ -703,7 +1041,7 @@ mod tests {
         let fresh = br#"{"jsonrpc":"2.0","id":4,"method":"thread/start","params":{}}
 "#;
         assert!(matches!(
-            inspect_client_line(fresh, Some("thread-original"), &mut pending),
+            inspect_client_line(fresh, Some("thread-original"), None, &mut pending),
             ClientLineAction::Reject(_)
         ));
     }
@@ -714,14 +1052,168 @@ mod tests {
         let request = br#"{"jsonrpc":"2.0","id":7,"method":"thread/resume","params":{"threadId":"thread-original"}}
 "#;
         assert!(matches!(
-            inspect_client_line(request, Some("thread-original"), &mut pending),
-            ClientLineAction::Forward
+            inspect_client_line(request, Some("thread-original"), None, &mut pending),
+            ClientLineAction::Forward(_)
         ));
         assert_eq!(
             pending
                 .get("7")
                 .map(|item| item.requested_thread_id.as_str()),
             Some("thread-original")
+        );
+    }
+
+    #[test]
+    fn ssh_resume_rewrites_placeholder_cwd_to_remote_directory() {
+        let mut pending = HashMap::new();
+        let request = br#"{"jsonrpc":"2.0","id":8,"method":"thread/resume","params":{"threadId":"thread-original","cwd":"C:\\placeholder"}}
+"#;
+        let ClientLineAction::Forward(forwarded) = inspect_client_line(
+            request,
+            Some("thread-original"),
+            Some("/srv/project"),
+            &mut pending,
+        ) else {
+            panic!("matching SSH resume must be forwarded");
+        };
+        let forwarded: Value = serde_json::from_slice(trim_line_ending(&forwarded)).unwrap();
+        assert_eq!(forwarded["params"]["cwd"], "/srv/project");
+        assert!(pending.contains_key("8"));
+    }
+
+    #[test]
+    fn ssh_codex_command_quotes_paths_environment_and_arguments() {
+        let launch = ssh_codex_launch("identity_file");
+        let args = vec![
+            "app-server".to_string(),
+            "--listen".to_string(),
+            "stdio://".to_string(),
+        ];
+        let command = launch.remote_command(&args);
+
+        assert!(command.starts_with("cd -- '/srv/project dir' && exec 3>&1 && exec"));
+        assert!(command.contains("\"${SHELL:-/bin/sh}\" -lic"));
+        assert!(command.ends_with("1>&2"));
+        assert!(command.contains("1>&3 3>&-"));
+        assert!(command.contains("source ~/.profile"));
+        assert_eq!(
+            format_remote_home_path("~/codex config"),
+            "\"${HOME}\"/'codex config'"
+        );
+        for expected in [
+            "CODEX_HOME",
+            "${HOME}",
+            "GIT_CONFIG_KEY_0",
+            "safe.directory",
+            "codex",
+            "app-server",
+            "--listen",
+            "stdio://",
+        ] {
+            assert!(command.contains(expected), "missing {expected}: {command}");
+        }
+
+        let transport = launch.build_launch(&args).unwrap();
+        assert_eq!(transport.args.first().map(String::as_str), Some("-T"));
+        assert_eq!(transport.args.last(), Some(&command));
+    }
+
+    #[test]
+    fn ssh_codex_launch_rejects_interactive_authentication() {
+        for auth_mode in ["password_prompt", "interactive"] {
+            assert_eq!(
+                ssh_codex_launch(auth_mode).encode().unwrap_err(),
+                "handoff_ssh_interactive_auth_unsupported"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_codex_launch_serialization_contains_only_the_credential_reference() {
+        let launch = ssh_codex_launch("credential_ref");
+        let encoded = launch.encode().unwrap();
+        let decoded = BASE64_STANDARD.decode(encoded).unwrap();
+        let document: Value = serde_json::from_slice(&decoded).unwrap();
+
+        assert_eq!(
+            document.pointer("/transport/credentialRef"),
+            Some(&Value::String("cli-manager:ssh:host-1".to_string()))
+        );
+        assert!(document.pointer("/transport/password").is_none());
+        assert!(document.get("password").is_none());
+    }
+
+    #[test]
+    fn ssh_app_server_events_drive_handoff_notifications() {
+        let started = json_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-original",
+                "turn": { "id": "turn-1", "status": "inProgress" }
+            }
+        }));
+        let started =
+            ssh_handoff_hook_payload(&started, "local-session", Some("thread-original")).unwrap();
+        assert_eq!(started["tabId"], "local-session");
+        assert_eq!(started["event"], "UserPromptSubmit");
+        assert_eq!(started["sessionId"], "thread-original");
+
+        let approval = json_line(&json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "thread-original",
+                "turnId": "turn-1",
+                "itemId": "item-1"
+            }
+        }));
+        let approval =
+            ssh_handoff_hook_payload(&approval, "local-session", Some("thread-original")).unwrap();
+        assert_eq!(approval["event"], "PermissionRequest");
+        assert_eq!(approval["toolUseId"], "item-1");
+
+        let completed = json_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-original",
+                "turn": { "id": "turn-1", "status": "failed" }
+            }
+        }));
+        let completed =
+            ssh_handoff_hook_payload(&completed, "local-session", Some("thread-original")).unwrap();
+        assert_eq!(completed["event"], "StopFailure");
+    }
+
+    #[test]
+    fn ssh_handoff_notifications_ignore_retrying_errors_and_session_drift() {
+        let retrying = json_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "error",
+            "params": {
+                "threadId": "thread-original",
+                "turnId": "turn-1",
+                "willRetry": true,
+                "error": { "message": "temporary" }
+            }
+        }));
+        assert!(
+            ssh_handoff_hook_payload(&retrying, "local-session", Some("thread-original"),)
+                .is_none()
+        );
+
+        let drifted = json_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-other",
+                "turn": { "id": "turn-2", "status": "inProgress" }
+            }
+        }));
+        assert!(
+            ssh_handoff_hook_payload(&drifted, "local-session", Some("thread-original"),).is_none()
         );
     }
 }

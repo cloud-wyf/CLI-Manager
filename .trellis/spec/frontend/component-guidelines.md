@@ -54,6 +54,47 @@ terminalProcessManager.subscribeOutput(sessionId, (delivery) => {
 
 **Tests**: Run `npx tsc --noEmit` and `node --test scripts/ptyHostSocket.test.mjs scripts/terminalProcessManager.test.mjs scripts/terminalReplay.test.mjs scripts/terminalResizeDebouncer.test.mjs scripts/terminalResizeRenderBarrier.test.mjs scripts/terminalSplitLayout.test.mjs scripts/terminalReflowPolicy.test.mjs`; manually verify background output, reconnect replay, rapid split/fullscreen shrink, equal text sharpness across adjacent panes, transparent terminal backgrounds, IME, WebGL fallback, and no duplicate output after daemon reconnect.
 
+### Convention: Terminal CLI-specific input uses immutable metadata plus bounded runtime detection
+
+**What**: Input behavior that differs by CLI must first use the `TerminalSession.cliTool` captured when the Agent terminal was created, then compatible project/title/startup metadata. A plain Shell that manually starts a CLI may use current viewport TUI signatures as a bounded runtime fallback.
+
+**Why**: Project records, Tab titles, and startup commands are not a complete runtime identity. A locally created terminal may intentionally omit `projectId`, and users may start Codex manually. Persisting a guessed runtime CLI back into the session is also unsafe because the process can exit back to the Shell.
+
+```typescript
+// Wrong: misses immutable session identity and manually launched CLIs.
+const codex = project.cli_tool === "codex" || CODEX_COMMAND_PATTERN.test(session.startupCmd);
+
+// Correct: stable metadata first; runtime fallback is limited to the current viewport.
+const codex = session.cliTool === "codex"
+  || project.cli_tool === "codex"
+  || matchesCodexStartupMetadata(session)
+  || hasCodexTuiViewport(terminal);
+```
+
+**Contracts**:
+
+- Configured shortcut matching remains authoritative; runtime detection chooses only the PTY byte sequence.
+- Codex multiline input uses `ESC + CR`; ordinary Shell and Claude input keep their existing sequence.
+- Runtime detection must inspect only the current viewport; off-viewport scrollback is historical evidence and must never establish current CLI identity.
+- Do not assume Codex uses the alternate buffer. Normal/alternate behavior depends on CLI version, launch arguments, and user configuration.
+- Project-managed Codex sessions should still prefer `TerminalSession.cliTool` or other immutable startup metadata over viewport text.
+- Do not introduce foreground-process IPC solely to infer this input behavior unless local, WSL, and SSH process ownership contracts are designed together.
+
+**Good/Base/Bad Cases**:
+
+- Good: a project Agent terminal remains identifiable after project metadata changes because its session captured `cliTool`.
+- Base: a normal Shell uses normal newline behavior; manually running `codex` in either normal or alternate buffer enables Codex newline encoding without requiring Hook installation.
+- Good: once Codex TUI signatures leave the current viewport, runtime fallback stops matching.
+- Bad: requiring `buffer.type === "alternate"`; `--no-alt-screen` and user configuration make legitimate Codex sessions stay in the normal buffer.
+- Bad: permanently setting `session.cliTool = "codex"` from viewport text or one Hook event without an authoritative exit transition.
+
+**Tests Required**:
+
+- Assert project-session detection reads `TerminalSession.cliTool`.
+- Assert visible normal- and alternate-buffer `OpenAI Codex` and `/model to change` signatures are recognized.
+- Assert ordinary Shell, Claude, and off-viewport Codex text are rejected.
+- Run `node --test scripts/terminalNewlineShortcut.test.mjs` and `npx tsc --noEmit`.
+
 ### Convention: OSC color-query normalization has no frontend PTY side effects
 
 **What**: Rust PTY owns live OSC 10/11 replies. Frontend normalization only removes residual queries from live, replay, and restored display text; it must not import the process manager or write a reply.
@@ -1079,6 +1120,61 @@ const option = {
 
 ## Common Mistakes
 
+### Convention: Visible terminal panes use non-layout marker overlays
+
+**What**: The active visible Pane uses a focus color mixed from the current terminal muted and background colors, while the active main-session Tab may override it with persisted Hook done, failed, or attention colors. Render marker lines as an absolute, pointer-transparent overlay; never use layout borders, shadows, animation, or xterm remounting.
+
+**Contracts**:
+
+- Resolve Hook state from the active Tab's Hook source only. Shell lifecycle status must not create Pane status colors.
+- Render markers only when the current visible layout contains more than one Pane. A single Pane with multiple Tabs renders no focus or Hook marker; a fullscreen Pane from an underlying split layout remains eligible.
+- Focused markers use 2 px at full opacity. Background done, failed, or attention markers use 1 px at 50% opacity; background running renders nothing.
+- Hidden Workspans and fullscreen-excluded or filtered-out Pane layouts render no marker. Existing Workspan summary dots remain authoritative for hidden layouts.
+- Window blur, document hiding, minimize, and tray transitions remove focus emphasis but preserve background Hook markers.
+- PTY, file-editor, and subagent-transcript Pane kinds receive focus emphasis. Only the main PTY session receives Hook status colors.
+- Marker overlays must be children of `.ui-terminal-pane-content`, so every style starts at the terminal content boundary and never wraps the Pane Tab bar.
+- The `tab-top` style keeps a full-width top line and limits both side lines to `2%` of the content height. The `full` style keeps full-height sides and a bottom line.
+- The settings style chooser must show a compact two-Pane terminal and mount the production `.ui-terminal-pane-marker` overlay only inside the active Pane content. Do not duplicate marker geometry in preview-only elements. Its Pane content must flex into the space left by the fixed header so the full marker bottom edge is not clipped. The compact preview may override `--terminal-pane-marker-side-height` with a visible pixel length while production keeps the `2%` fallback. Keep the style-card border neutral so it cannot overlap the marker preview; express selection with `aria-pressed`, a subtle primary-tinted background, primary label text, and a visible check. Done, failed, and attention colors must be keyboard-selectable preview options; both style previews use the selected option's live color, and focusing or opening a color input selects its option without persisting preview-only state.
+- Settings sanitize the enabled state, style, and each `#RRGGBB` color independently, default to disabled behavior, persist through `settingsStore`, and participate in preference sync.
+
+```typescript
+type TerminalPaneMarkerStyle = "full" | "tab-top";
+
+interface TerminalPaneMarkerSettings {
+  enabled: boolean;
+  style: TerminalPaneMarkerStyle;
+  doneColor: string;
+  failedColor: string;
+  attentionColor: string;
+}
+```
+
+**Validation matrix**:
+
+- Missing settings object or missing/invalid `enabled` -> use the complete default object and disable marker behavior.
+- Explicit `enabled: true` -> preserve the existing marker behavior; disabling must retain style and color preferences.
+- Visible Pane count <= 1 -> render no marker, regardless of Tab count or Hook status.
+- Default focus color -> mix terminal muted 60% with terminal background 40%; default done color -> `#8FBF7F`; failed and attention keep their independent defaults.
+- Removed legacy `tab-frame` or any invalid style -> fall back only `style` to `tab-top`.
+- Invalid color or a value outside exact `#RRGGBB` syntax -> fall back only that color.
+- Valid lower-case hex -> normalize it to upper case.
+
+**Good/Base/Bad cases**:
+
+- Good: a focused Pane with `attention` uses the approval color at 2 px/full opacity.
+- Base: an unfocused Pane with Hook `running` has no marker; if the app is focused, only the active Pane keeps the default focus line.
+- Bad: mounting the overlay under `.ui-terminal-pane`, because `inset: 0` then includes the Pane Tab bar; reading merged `tabNotifications` is also invalid because ordinary Shell completion could look like an Agent Hook result.
+
+```tsx
+// Wrong: changes layout and consumes merged Shell/Hook state.
+<div style={{ borderColor: statusColor }} data-status={tabNotifications[activeId]} />
+
+// Correct: resolve the active Tab's Hook source, then overlay pointer-transparent lines.
+const marker = resolveTerminalPaneMarker({ hookStatus: tabStatuses[activeId]?.hook ?? "none", ...state });
+```
+
+**Tests**: Run `node scripts/terminalPaneMarker.test.mjs`, `node scripts/terminalWorkspan.test.mjs`, `node scripts/terminalHookBinding.test.mjs`, and `npx tsc --noEmit`. Manually verify all marker styles, hidden Tab bars, nested horizontal/vertical splits, Pane fullscreen, Workspan switching, scoped filtering, window blur/minimize/tray restore, and supported CLI Hook events.
+
 ### Common Mistake: Setting only `borderColor` on Mantine selection cards
 
 **Symptom**: A settings option card looks borderless even though it has Tailwind `border` or a shared class such as `ui-selection-card`.
@@ -1196,33 +1292,15 @@ terminal.focus();
 
 **Prevention**: For user-facing terminal clear actions, send Ctrl+L (`\x0c`) through `pty_write` so the shell/TUI clears or redraws through the same path as keyboard input. Reserve `terminal.clear()` for internal buffer maintenance where IME/helper textarea position is irrelevant.
 
-### Common Mistake: Treating `cursorBlink` as full cursor visibility control
+### Convention: Keep application cursor visibility sequences intact
 
-**Symptom**: A TUI such as Codex still shows rapid cursor flashing after `cursorBlink` is set to `false`.
+**Contract**: PTY output must pass DECTCEM sequences (`CSI ?25h` show cursor and `CSI ?25l` hide cursor) to xterm without filtering, delayed reinjection, or a CLI-specific visual cursor overlay.
 
-**Cause**: `cursorBlink` only controls xterm's own blink animation. Terminal applications can still emit DECTCEM sequences (`CSI ?25h` show cursor, `CSI ?25l` hide cursor), and xterm honors those independently while processing PTY output.
+**Why**: TUI applications own their cursor visibility and position. Delaying only the show sequence can hide the cursor throughout continuous output, while replacing a TUI cursor from inferred viewport structure creates new disagreement during redraw and input editing.
 
-**Wrong**:
+**Prevention**: Do not add Codex-specific cursor stabilization in `XTermTerminal`. Cursor-position flicker emitted during Codex redraw remains native application behavior; Claude background-image caret preservation belongs to buffer background normalization and must not rewrite DECTCEM.
 
-```tsx
-const terminal = new Terminal({
-  cursorBlink: false,
-});
-// Assumes this also suppresses application-driven show/hide cursor churn.
-```
-
-**Correct**:
-
-```tsx
-if (sequence === "\x1b[?25l") {
-  cancelPendingCursorShow();
-  writeNow(sequence);
-} else if (sequence === "\x1b[?25h") {
-  scheduleCursorShow();
-}
-```
-
-**Prevention**: For high-frequency TUI redraw issues, inspect application-emitted ANSI cursor visibility sequences before changing xterm appearance options. Pass hide through immediately, debounce show, and keep output processing in the PTY write path instead of adding CLI-specific UI state.
+**Tests**: Run `node --test scripts/terminalPiCompatibility.test.mjs scripts/terminalNewlineShortcut.test.mjs` and `npx tsc --noEmit`. Assert the shared output transform contains only the existing Pi compatibility transform and no cursor visibility filter or visual cursor overlay.
 
 ### Common Mistake: Letting xterm helper textarea follow non-IME redraw cursors
 
@@ -1230,7 +1308,22 @@ if (sequence === "\x1b[?25l") {
 
 **Cause**: xterm syncs `.xterm-helper-textarea` to the terminal cursor on cursor moves. This is required for IME composition, but outside composition it can create browser scroll/anchor churn during progress-bar redraws.
 
-**Fix**: In `XTermTerminal`, keep the helper textarea pinned to xterm's offscreen default while not composing, but keep it at least `1x1`; xterm's IME fallback for active-IME punctuation reads textarea diffs after keyCode 229, and some IMEs drop the first character when the helper textarea is `0x0`. During IME composition, anchor `.composition-view` and `.xterm-helper-textarea` to xterm's current `buffer.active.cursorX/cursorY` when that cursor is on an input prompt. If a TUI redraw moves the cursor to a status/progress row during composition, fall back to the nearest visible prompt row instead of blindly trusting that redraw cursor. Prompt recognition must include Codex's `›` prompt in addition to common shell prompts such as `>`, `$`, `#`, and `PS>`. Do not scan only the bottom rows or force a bottom-row fallback: real input can sit above the bottom while the IME candidate window still needs to follow the visible input row. Reapply the frozen composition anchor after xterm render events, because xterm's own `CompositionHelper.updateCompositionElements()` can rewrite `.composition-view` and helper textarea positions from the live buffer cursor. After `compositionend`, pin the helper textarea offscreen again.
+**Fix**: In `XTermTerminal`, keep the helper textarea pinned to xterm's offscreen default while not composing, but keep it at least `1x1`; xterm's IME fallback for active-IME punctuation reads textarea diffs after keyCode 229, and some IMEs drop the first character when the helper textarea is `0x0`. During IME composition, anchor `.composition-view` and `.xterm-helper-textarea` to xterm's current `buffer.active.cursorX/cursorY` when that cursor is inside a recognized input region. That live cursor has priority over inverse-rendered cells: a TUI may use inverse attributes for a model selector or status field, so scanning for an arbitrary inverse cell is not cursor detection. If a TUI redraw moves the cursor to a status/progress row during composition, fall back to the nearest visible prompt row instead of blindly trusting that redraw cursor. Prompt recognition must include Codex's `›` prompt in addition to common shell prompts such as `>`, `$`, `#`, and `PS>`. Do not scan only the bottom rows or force a bottom-row fallback: real input can sit above the bottom while the IME candidate window still needs to follow the visible input row. Reapply the frozen composition anchor after xterm render events, because xterm's own `CompositionHelper.updateCompositionElements()` can rewrite `.composition-view` and helper textarea positions from the live buffer cursor. xterm also calls `_syncTextArea()` from cursor moves, resize, and its own `compositionstart` listener. Windows IMEs may read and lock the helper-textarea geometry after an unmodified keyCode 229 Process key but before `compositionstart`; therefore the capture-phase Process-key handler must synchronously re-pin through the CLI-specific composition and textarea resolvers. A RAF, timeout, or compositionstart-only correction is too late for the native candidate window. When resize fires outside composition, immediately and on the next animation frame re-pin the idle helper through the CLI-specific `resolveTextareaAnchor`; otherwise the next Windows IME session can start from a TUI status cursor. When resize fires during composition, invalidate the frozen row/column anchor before reapplying it because xterm reflow makes old viewport-relative coordinates invalid. After `compositionend`, pin the helper textarea again.
+
+**Pi exception**: Pi draws its editor cursor as an inverse cell inside paired horizontal rules while its hardware cursor can remain at the right edge of the same editor row. Within a validated Pi editor region, the inverse software cursor therefore has priority over the hardware cursor. Inverse cells outside that region are ignored, and the hardware cursor remains the fallback when no inverse cell is visible. Returning the stale right-edge cursor makes xterm calculate both `left` and `maxWidth` from the last column, which moves raw pinyin to the right and clips it to one letter. Consecutive Windows compositions can also start before Pi renders the previous committed candidate. Only an active Pi compatibility controller may opt into re-resolving the frozen anchor on composition update, xterm render, and cursor move; generic Shell/Claude/Codex composition anchors remain frozen so status redraw cursors cannot move them.
+
+> **Unresolved limitation (2026-07-30)**: These contracts pass synthetic tests but do not resolve the real Windows Pi second-composition drift. Do not treat Process-key re-pinning, inverse-cursor priority, or render-time refresh as a confirmed end-to-end fix. Future work must capture the real native `keydown 229 → compositionstart/update/end → xterm timers → Pi PTY redraw` order and textarea/composition-view geometry from a failing session before adding another fallback.
+
+```typescript
+// Wrong: a stale hardware cursor inside the editor hides Pi's visible software cursor.
+if (containsRow(region, cursor.y)) return cursor;
+return findInverseAnchor(terminal, region);
+
+// Correct: only Pi's validated editor region grants inverse-cursor priority.
+const inverseAnchor = findInverseAnchor(terminal, region);
+if (inverseAnchor) return inverseAnchor;
+if (containsRow(region, cursor.y)) return cursor;
+```
 
 **Composition-end timing**: xterm intentionally reads the final helper-textarea value from its own `setTimeout(0)` after `compositionend`, because WebKit/Chromium can update the committed candidate after the event listeners return. The application IME listener must defer helper-textarea re-anchoring, scroll restoration, and `scheduleFit(true)` to a later timer registered after xterm's listener. Cancel that deferred cleanup if another composition starts or the controller is disposed. Mutating textarea geometry synchronously in `compositionend` can make WKWebView commit only the final raw pinyin character.
 
@@ -1257,10 +1350,14 @@ textarea.style.display = "none";
 
 - [ ] TUI redraws, with or without Claude Code `/compact`, do not make the input anchor jump.
 - [ ] Chinese/IME composition text and the candidate window stay near the visible input cursor, including when the input row is not at the bottom.
+- [ ] Fullscreen, split, and resize operations re-pin the idle helper before the next composition; inverse status fields do not move composition text, and reflow does not retain stale composition rows.
+- [ ] After xterm rewrites the helper textarea to a status cursor, an unmodified helper-textarea keyCode 229 synchronously restores the CLI anchor before `compositionstart`, without waiting for RAF or timeout.
+- [ ] In a Pi editor with a stale right-edge hardware cursor and a left-side inverse software cursor, composition `left` and `maxWidth` derive from the inverse cursor; without an inverse cursor, the in-region hardware cursor remains the fallback.
+- [ ] When a second Pi composition initially freezes at the right edge, the next Pi render/cursor event refreshes `left` and `maxWidth` from the visible editor cursor; the same event does not unfreeze non-Pi composition anchors.
 - [ ] If a TUI status/progress redraw owns the current cursor during composition, the candidate window falls back to the nearest visible prompt row.
 - [ ] Normal keyboard input, Enter, and paste still reach the PTY.
 - [ ] Chinese/IME composition still positions the candidate window correctly.
-- [ ] `node --test scripts/terminalImeComposition.test.mjs` confirms composition cleanup stays behind xterm's deferred commit and is cancelled for a new composition/disposal.
+- [ ] `node --test scripts/terminalImeAnchor.test.mjs scripts/terminalImeComposition.test.mjs` confirms real-cursor priority, prompt fallback, Process-key synchronous re-pinning, resize invalidation, composition cleanup ordering, and cancellation for a new composition/disposal.
 
 ### Common Mistake: Estimating xterm IME cell size from container bounds
 
@@ -1342,7 +1439,7 @@ terminal.refresh(row, row);
 
 For terminal background images, active transparency mode is an appearance-mode gate equivalent to theme brightness. Keep prompt detection narrow, but do not block normalization only because the terminal theme is dark; dark themes can still expose stale explicit backgrounds as opaque boxes over the image.
 
-If a CLI draws large opaque panels or status rows over a terminal background image, remember that CLI themes only affect which ANSI colors are emitted; they do not make ANSI background cells transparent. For known full-screen AI TUIs such as Claude/Codex, the background-image mode may clear explicit background attrs and inverse flags across the visible viewport. Keep that broad pass gated by active transparency plus the known TUI session or a visible TUI signature; use the narrower prompt-row correction for unknown tools.
+If a CLI draws large opaque panels or status rows over a terminal background image, remember that CLI themes only affect which ANSI colors are emitted; they do not make ANSI background cells transparent. For known full-screen AI TUIs such as Claude/Codex, the background-image mode may clear explicit background attrs and wide inverse regions across the visible viewport. Preserve isolated inverse cells because Claude can use one as its software input cursor. Keep that broad pass gated by active transparency plus the known TUI session or a visible TUI signature; use the narrower prompt-row correction for unknown tools.
 
 Do not keep WebGL enabled while a terminal background image is active. The default renderer is the safer path for transparent backgrounds and xterm buffer-attr corrections; WebGL can preserve or redraw opaque TUI cells in ways that make Codex/Ratatui panels appear as black blocks.
 
@@ -1353,6 +1450,37 @@ Do not keep WebGL enabled while a terminal background image is active. The defau
 **Why**: Rendered xterm coordinates are not a reliable representation of shell or TUI input state. Enabling this behavior desynchronizes the visible caret, the PTY line editor, and TUI-owned input boxes.
 
 **Tests**: Verify normal click-to-focus and mouse text selection still work. Do not add a click-to-caret acceptance test because cursor relocation is intentionally absent.
+
+### Convention: Mouse-aware TUIs receive unmodified mouse reports
+
+**What**: xterm instances must use the shared `TerminalMouseInteraction` policy. When a PTY application enables mouse reporting, ordinary click, drag, and move events go to that application; users hold Shift to select terminal text. This is separate from the unsupported click-to-caret behavior above.
+
+**Why**: Full-screen TUIs such as Grok render their own scrollback and scrollbar inside terminal cells. Setting `mouseEventsRequireAlt: true` makes those controls look clickable while silently withholding the mouse reports unless Alt is held. Wheel events are unaffected, which can hide the mismatch during testing.
+
+**Correct**:
+
+```tsx
+const terminal = new Terminal({
+  ...createTerminalMouseInteractionOptions(),
+});
+```
+
+**Wrong**:
+
+```tsx
+const terminal = new Terminal({
+  mouseEventsRequireAlt: true,
+});
+```
+
+**Contracts**:
+
+- Keep the policy generic; do not detect Grok or another CLI by process name.
+- A shell that has not enabled mouse reporting keeps normal xterm text selection behavior.
+- A mouse-aware TUI receives ordinary mouse reports; Shift remains the selection modifier.
+- Mouse policy belongs in `src/terminal/browser/TerminalMouseInteraction.ts`; `XTermTerminal` only assembles it.
+
+**Tests**: Run `node --test scripts/terminalMouseInteraction.test.mjs` and `npx tsc --noEmit`; manually verify Grok fullscreen click/drag/wheel, Shift+drag selection in a mouse-aware TUI, and ordinary shell selection.
 
 ### Convention: xterm Windows PTY and paste handling
 
@@ -1422,6 +1550,74 @@ invoke("pty_write", { sessionId, data });
 - forwardTerminalInput() consumes a replacement selection before writing to the PTY, then clears only the state required by the original input path.
 
 **Tests**: Run npx tsc --noEmit; manually verify Ctrl/Cmd+A, Shift+Left/Right, collapse with Left/Right, Backspace/Delete, typing to replace a selection, Ctrl/Cmd+C selection copy versus Ctrl+C interrupt, and switching sessions after a selection.
+
+### Convention: Pi terminal compatibility stays outside XTermTerminal
+
+**What**: Shared IME input-anchor parsing lives in `src/lib/terminalImeAnchor.ts`, while IME DOM events
+and composition lifecycle stay in `src/lib/terminalIme.ts`. Shared CLI context parsing lives in
+`src/terminal/browser/TerminalCliContext.ts`.
+Pi IME positioning, ANSI transformation, and diagnostics live in `TerminalPiIme.ts`,
+`TerminalPiAnsiTransform.ts`, and `TerminalPiDiagnostics.ts`. `TerminalPiCompatibility.ts` is only
+the facade/state coordinator. `XTermTerminal` supplies context and connects narrow callbacks.
+
+**Why**: Pi issue #177 crosses ConPTY, daemon transport, frontend normalization, xterm parsing, and
+rendering. Live diagnostics proved that the formal OSC 133 user-message block reaches the frontend,
+then disappears during OSC normalization. The integration scanner preserved each OSC sequence but
+failed to copy the ordinary text between two managed OSC sequences, leaving only the padded
+background row. `DECSET/DECRST 2026` filtering and viewport refresh do not fix this data loss.
+
+**Contracts**:
+
+- Recognize Pi only from the exact `pi` project/title tool or a startup command whose executable
+  token is `pi`, `pi.cmd`, `pi.exe`, or `pi.ps1`; strings such as `pip install pi` are unrelated.
+- Pi compatibility code may rewrite only exact built-in Pi tool-status background SGR sequences;
+  every other byte must be preserved.
+- OSC integration scanning must preserve the bytes before every recognized OSC sequence, including
+  ordinary CSI/text between consecutive OSC 133/633/7 sequences. Test every possible daemon-frame
+  split point around the sequence and message body.
+- Development diagnostics may observe raw frame, normalized text, and xterm write-commit state,
+  but must remain silent in production and for non-Pi sessions.
+- Diagnostic payloads must be bounded and must not persist complete terminal content.
+- `useTerminalDisplay` exposes only tool-neutral optional callbacks; Pi branching stays out of the
+  shared transport and write/ACK path.
+- `attachTerminalIme` resolves anchors in this order: shared fallback, optional CLI composition
+  correction, then optional helper-textarea correction. `.composition-view` uses the corrected input
+  row; only the helper textarea moves to a composer bottom border.
+- Pi recognizes an editor only between paired horizontal rules in the visible viewport. A rule may
+  contain Pi's scrolling hint between horizontal edges. A live buffer cursor inside that region wins;
+  otherwise only inverse cells inside the same region may act as the software cursor. Inverse status
+  cells outside a paired editor are invalid.
+- Terminal resize/reflow invalidates a frozen composition anchor before both Pi corrections run.
+- Outside composition, terminal resize must reapply the Pi helper-textarea resolver after xterm's own
+  `_syncTextArea()` write; the idle pin uses the same bottom-rule anchor as the active composition path.
+- Pi tool background normalization is a stateful pre-write CSI transform, never an xterm buffer
+  mutation. It replaces exact dark/light RGB status backgrounds with `SGR 49`, plus unambiguous
+  256-color fallbacks 22/52/255. Conflicting 17/254 values, foreground attributes, user/custom
+  backgrounds, OSC payloads, and non-target CSI sequences stay byte-for-byte unchanged.
+- Live output, daemon replay, and initial serialized snapshots use the same transformer instance.
+  Reset/dispose clears incomplete CSI state.
+
+```typescript
+interface PiTerminalCompatibility {
+  resolveImeCompositionAnchor(terminal: Terminal, anchor: TerminalImeAnchor): TerminalImeAnchor;
+  resolveImeTextareaAnchor(terminal: Terminal, anchor: TerminalImeAnchor): TerminalImeAnchor;
+  transformOutput(text: string): string;
+  reset(): void;
+}
+```
+
+**Cases**:
+
+- Good: paired Pi rules plus an in-region hardware/software cursor -> composition uses the input row
+  and only the helper textarea moves to the bottom rule.
+- Base: non-Pi session, unpaired rules, or no in-region cursor -> return the shared fallback without
+  buffer mutation.
+- Bad: touching xterm private `_line/loadCell/setCell` APIs or broadly clearing a rendered row.
+
+**Tests**: Run `node --test scripts/terminalImeAnchor.test.mjs scripts/terminalImeComposition.test.mjs scripts/terminalOsc.test.mjs scripts/terminalPiCompatibility.test.mjs`;
+assert Pi context detection, bounded summaries, production/non-Pi silence, OSC 10/11 filtering,
+byte-for-byte Pi message preservation at every frame split, separate IME anchors, RGB/256-color
+matching, reset behavior, preserved user/custom backgrounds, and foreground preservation.
 
 ### Common Mistake: Letting xterm sync updates clear the screen while the user is reading scrollback
 

@@ -88,3 +88,73 @@ migrate_store_file(&old_store_dir.join("settings.json"), &data_dir.join("setting
 ```
 
 The migration copies missing files and otherwise merges only missing JSON object keys.
+
+## Scenario: Terminal clipboard image attachments
+
+### 1. Scope / Trigger
+
+- Trigger: changing terminal clipboard-image persistence, attachment cleanup, or the `file_attach_data` IPC contract.
+- Goal: all local terminal sessions use one app-managed attachment directory without writing `.cli-manager` folders into user projects.
+
+### 2. Signatures
+
+```rust
+file_attach_data(file_name: String, data_base64: String) -> Result<String, String>
+file_cleanup_expired_attachments() -> Result<u64, String>
+```
+
+- Stable attachment directory: `<home>/.cli-manager/attachments`.
+- `file_attach_data` returns the generated file's absolute native path.
+
+### 3. Contracts
+
+- Resolve the attachment root through `app_paths::cli_manager_data_dir()`; do not accept a project path or terminal cwd from the WebView.
+- Keep attachment file-name sanitization, collision suffixes, the 5 MiB decoded-data limit, and the 2-day retention period in Rust.
+- The frontend passes only `fileName` and `dataBase64`, then applies the existing shell-specific quoting to the returned absolute path.
+- Attachment cleanup targets the same global directory and runs at most once per frontend process unless a cleanup attempt fails.
+- Existing project-scoped `.cli-manager/attachments` directories are not migrated or deleted automatically.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Home directory cannot be resolved | Return `home_dir_unavailable`. |
+| Base64 is invalid | Return `decode_failed: ...`. |
+| Decoded data is empty | Return `attachment_empty`. |
+| Decoded data exceeds 5 MiB | Return `attachment_too_large`. |
+| Data or attachment directory is a symlink/reparse point or not a directory | Return `path_is_symlink` / `path_not_directory`. |
+| Sanitized name already exists | Add a numeric suffix without overwriting the existing file. |
+| Attachment directory does not exist during cleanup | Return `0`. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: pasting an image in any project writes `<home>/.cli-manager/attachments/clipboard-*.png` and returns that absolute path.
+- Base: a terminal without a project or cwd can still paste a clipboard image.
+- Good: cleanup skips directories, symlinks, and files newer than 2 days.
+- Bad: accepting `rootPath` from the frontend and recreating `<project>/.cli-manager/attachments`.
+- Bad: returning a project-relative path that the frontend must join with project or session state.
+
+### 6. Tests Required
+
+- Rust unit test asserts the attachment directory is exactly `<data_dir>/attachments`, with no nested `.cli-manager` segment.
+- Rust tests preserve attachment name sanitization, collision handling, decoded-size limits, and cleanup retention behavior when those helpers change.
+- Run `cargo check` after changing the Rust IPC contract.
+- Run `npx tsc --noEmit` after changing the frontend invoke payload or returned-path handling.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+await invoke("file_attach_data", { rootPath: project.path, fileName, dataBase64 });
+```
+
+This leaks project/session state into an app-owned persistence decision and creates metadata folders in user projects.
+
+#### Correct
+
+```typescript
+const absolutePath = await invoke<string>("file_attach_data", { fileName, dataBase64 });
+```
+
+Rust owns the stable app-data path and returns the complete path required by the terminal.

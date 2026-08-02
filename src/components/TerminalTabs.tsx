@@ -108,6 +108,10 @@ import {
   TERMINAL_FILE_NAVIGATION_REQUEST_EVENT,
   type TerminalFileNavigationRequest,
 } from "../lib/terminalFileNavigation";
+import {
+  resolveTerminalPaneMarker,
+  type TerminalPaneMarkerSettings,
+} from "../lib/terminalPaneMarker";
 
 const HistoryWorkspace = lazy(() =>
   import("./HistoryWorkspace").then((module) => ({ default: module.HistoryWorkspace }))
@@ -1710,6 +1714,9 @@ interface PaneLeafViewProps {
   historyActive: boolean;
   editingSessionId: string | null;
   tabNotifications: Record<string, TabNotificationState>;
+  hookNotifications: Record<string, TabNotificationState>;
+  paneMarkerSettings: TerminalPaneMarkerSettings;
+  isAppFocused: boolean;
   fontSize: number;
   fontFamily: string;
   resolvedTheme: "dark" | "light";
@@ -1758,6 +1765,9 @@ function PaneLeafView({
   historyActive,
   editingSessionId,
   tabNotifications,
+  hookNotifications,
+  paneMarkerSettings,
+  isAppFocused,
   fontSize,
   fontFamily,
   resolvedTheme,
@@ -1804,9 +1814,22 @@ function PaneLeafView({
     pane.activeSessionId && visiblePaneSessionIds.includes(pane.activeSessionId)
       ? pane.activeSessionId
       : visiblePaneSessionIds[0] ?? null;
+  const activePaneSession = effectivePaneActiveSessionId
+    ? paneSessions.find((session) => session.id === effectivePaneActiveSessionId) ?? null
+    : null;
+  const paneMarker = resolveTerminalPaneMarker({
+    isLayoutVisible: isLayoutVisible && !historyActive,
+    isSplitLayout: allPanes.length > 1,
+    isAppFocused,
+    isPaneFocused: effectivePaneActiveSessionId !== null && effectivePaneActiveSessionId === activeSessionId,
+    isMainSession: (activePaneSession?.kind ?? "pty") === "pty",
+    hookStatus: effectivePaneActiveSessionId ? hookNotifications[effectivePaneActiveSessionId] ?? "none" : "none",
+    settings: paneMarkerSettings,
+  });
+  const paneMarkerStyle = paneMarkerSettings.style;
 
   return (
-    <div className="ui-terminal-pane flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+    <div className="ui-terminal-pane relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       {!hideTabBar && (
         <PaneTabBar
           pane={pane}
@@ -1926,6 +1949,24 @@ function PaneLeafView({
           enabled={isLayoutVisible}
           activeDropPreview={activeDropPreview}
         />
+        {paneMarker && (
+          <div
+            className="ui-terminal-pane-marker"
+            data-marker-style={paneMarkerStyle}
+            data-marker-status={paneMarker.status}
+            style={{
+              "--terminal-pane-marker-color": paneMarker.color,
+              "--terminal-pane-marker-width": `${paneMarker.width}px`,
+              "--terminal-pane-marker-opacity": paneMarker.opacity,
+            } as CSSProperties}
+            aria-hidden="true"
+          >
+            <span className="ui-terminal-pane-marker__top" />
+            <span className="ui-terminal-pane-marker__right" />
+            <span className="ui-terminal-pane-marker__bottom" />
+            <span className="ui-terminal-pane-marker__left" />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2024,6 +2065,8 @@ function arePaneLeafViewPropsEqual(prevProps: PaneLeafViewProps, nextProps: Pane
   if (prevProps.terminalBackgroundEnabled !== nextProps.terminalBackgroundEnabled) return false;
   if (prevProps.terminalBackgroundImagePath !== nextProps.terminalBackgroundImagePath) return false;
   if (prevProps.hideTabBar !== nextProps.hideTabBar) return false;
+  if (prevProps.paneMarkerSettings !== nextProps.paneMarkerSettings) return false;
+  if (prevProps.isAppFocused !== nextProps.isAppFocused) return false;
   if (!areSessionIdSetsEqual(prevProps.visibleSessionIds, nextProps.visibleSessionIds)) return false;
   if (getPaneSiblingsSignature(prevProps.allPanes) !== getPaneSiblingsSignature(nextProps.allPanes)) return false;
   if ((prevProps.activeDropPreview?.paneId ?? null) !== (nextProps.activeDropPreview?.paneId ?? null)) return false;
@@ -2043,6 +2086,7 @@ function arePaneLeafViewPropsEqual(prevProps: PaneLeafViewProps, nextProps: Pane
   if (didPaneProjectsChange(prevProps, nextProps)) return false;
   if (prevProps.worktrees !== nextProps.worktrees) return false;
   if (didPaneNotificationsChange(prevProps.tabNotifications, nextProps.tabNotifications, nextProps.pane.sessionIds)) return false;
+  if (didPaneNotificationsChange(prevProps.hookNotifications, nextProps.hookNotifications, nextProps.pane.sessionIds)) return false;
   if (didPaneHiddenBackgroundChange(prevProps.hiddenBackgroundSessionIds, nextProps.hiddenBackgroundSessionIds, nextProps.pane.sessionIds)) return false;
 
   return (
@@ -2372,13 +2416,14 @@ export function TerminalTabs({
   const { prompt, promptDialog } = useAppPrompt();
   const { confirm, confirmDialog } = useAppConfirm();
   const { saveSession: saveSessionToSidebar, saveSessionDialog } = useSaveSessionToSidebar();
-  const { sessions, activeSessionId, workspans, activeWorkspanId, tabNotifications } = useTerminalStore(
+  const { sessions, activeSessionId, workspans, activeWorkspanId, tabNotifications, tabStatuses } = useTerminalStore(
     useShallow((s) => ({
       sessions: s.sessions,
       activeSessionId: s.activeSessionId,
       workspans: s.workspans,
       activeWorkspanId: s.activeWorkspanId,
       tabNotifications: s.tabNotifications,
+      tabStatuses: s.tabStatuses,
     }))
   );
   const setActive = useTerminalStore((s) => s.setActive);
@@ -2418,6 +2463,29 @@ export function TerminalTabs({
   const lightThemePalette = useSettingsStore((s) => s.lightThemePalette);
   const darkThemePalette = useSettingsStore((s) => s.darkThemePalette);
   const terminalBackgroundEnabled = useSettingsStore((s) => s.terminalBackground.enabled);
+  const paneMarkerSettings = useSettingsStore((s) => s.terminalPaneMarker);
+  const [isAppFocused, setIsAppFocused] = useState(() => document.visibilityState !== "hidden" && document.hasFocus());
+  const hookNotifications = useMemo<Record<string, TabNotificationState>>(() => {
+    const next: Record<string, TabNotificationState> = {};
+    for (const [sessionId, status] of Object.entries(tabStatuses)) {
+      next[sessionId] = status.hook ?? "none";
+    }
+    return next;
+  }, [tabStatuses]);
+
+  useEffect(() => {
+    const updateFocusState = () => {
+      setIsAppFocused(document.visibilityState !== "hidden" && document.hasFocus());
+    };
+    window.addEventListener("focus", updateFocusState);
+    window.addEventListener("blur", updateFocusState);
+    document.addEventListener("visibilitychange", updateFocusState);
+    return () => {
+      window.removeEventListener("focus", updateFocusState);
+      window.removeEventListener("blur", updateFocusState);
+      document.removeEventListener("visibilitychange", updateFocusState);
+    };
+  }, []);
   const terminalBackgroundImagePath = useSettingsStore((s) => s.terminalBackground.imagePath);
   const workspanEnabled = useSettingsStore((s) => s.workspanEnabled);
   const terminalToolbarVisibility = useSettingsStore((s) => s.terminalToolbarVisibility);
@@ -4046,6 +4114,9 @@ export function TerminalTabs({
         historyActive={historyActive}
         editingSessionId={editingSessionId}
         tabNotifications={tabNotifications}
+        hookNotifications={hookNotifications}
+        paneMarkerSettings={paneMarkerSettings}
+        isAppFocused={isAppFocused}
         fontSize={fontSize}
         fontFamily={fontFamily}
         resolvedTheme={resolvedTheme}
@@ -4107,10 +4178,13 @@ export function TerminalTabs({
     handleInstallWorktreeDeps,
     handleTogglePaneFullscreen,
     hiddenBackgroundSessionIds,
+    hookNotifications,
     hideBackgroundForSession,
     historyActive,
+    isAppFocused,
     lightThemePalette,
     moveSessionToPane,
+    paneMarkerSettings,
     projects,
     resolvedTheme,
     detachSessionToWorkspan,

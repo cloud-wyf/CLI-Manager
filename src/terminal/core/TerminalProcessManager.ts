@@ -5,6 +5,13 @@ import {
   type TerminalBinaryFrame,
   type TerminalProcessTraits,
 } from "../transport/PtyHostSocket";
+import { writeResourceDiagnostic } from "../../lib/resourceDiagnosticsLog";
+
+const OUTPUT_BACKLOG_WARN_BYTES = 4 * 1024 * 1024;
+const OUTPUT_BACKLOG_WARN_FRAMES = 1024;
+const OUTPUT_BACKLOG_RECOVERY_BYTES = OUTPUT_BACKLOG_WARN_BYTES / 2;
+const OUTPUT_BACKLOG_RECOVERY_FRAMES = OUTPUT_BACKLOG_WARN_FRAMES / 2;
+const DIAGNOSTIC_SESSION_LIMIT = 5;
 
 export interface TerminalClaudeProviderLaunchConfig {
   projectId: string;
@@ -79,6 +86,24 @@ interface TerminalOutputState {
   deliveredCount: number;
   socketUnlisten: UnlistenFn | null;
   latestCommittedSequence: number;
+  queuedBytes: number;
+  backlogWarned: boolean;
+}
+
+export interface TerminalProcessDiagnosticsSnapshot {
+  trackedSessions: number;
+  sessionsWithConsumers: number;
+  queuedFrames: number;
+  queuedBytes: number;
+  committedFrames: number;
+  topBacklogs: Array<{
+    sessionId: string;
+    consumerAttached: boolean;
+    queuedFrames: number;
+    queuedBytes: number;
+    committedFrames: number;
+    deliveredFrames: number;
+  }>;
 }
 
 /**
@@ -171,6 +196,33 @@ export class TerminalProcessManager {
     return this.processTraits.get(sessionId) ?? null;
   }
 
+  diagnosticsSnapshot(): TerminalProcessDiagnosticsSnapshot {
+    const sessions = [...this.outputStates.entries()].map(([sessionId, state]) => ({
+      sessionId,
+      consumerAttached: state.consumer !== null,
+      queuedFrames: state.frames.length,
+      queuedBytes: state.queuedBytes,
+      committedFrames: state.frames.reduce(
+        (count, frame) => count + (frame.committed ? 1 : 0),
+        0,
+      ),
+      deliveredFrames: state.deliveredCount,
+    }));
+    return {
+      trackedSessions: sessions.length,
+      sessionsWithConsumers: sessions.reduce(
+        (count, session) => count + (session.consumerAttached ? 1 : 0),
+        0,
+      ),
+      queuedFrames: sessions.reduce((total, session) => total + session.queuedFrames, 0),
+      queuedBytes: sessions.reduce((total, session) => total + session.queuedBytes, 0),
+      committedFrames: sessions.reduce((total, session) => total + session.committedFrames, 0),
+      topBacklogs: sessions
+        .sort((left, right) => right.queuedBytes - left.queuedBytes || right.queuedFrames - left.queuedFrames)
+        .slice(0, DIAGNOSTIC_SESSION_LIMIT),
+    };
+  }
+
   async subscribeOutput(sessionId: string, listener: (delivery: TerminalOutputDelivery) => void): Promise<UnlistenFn> {
     await ptyHostSocket.connect();
     const state = this.getOutputState(sessionId);
@@ -213,6 +265,8 @@ export class TerminalProcessManager {
         deliveredCount: 0,
         socketUnlisten: null,
         latestCommittedSequence: 0,
+        queuedBytes: 0,
+        backlogWarned: false,
       };
       this.outputStates.set(sessionId, state);
     }
@@ -226,18 +280,25 @@ export class TerminalProcessManager {
       state.sequences.clear();
       state.deliveredCount = 0;
       state.latestCommittedSequence = 0;
+      state.queuedBytes = 0;
       state.frames.push({ frame, committed: false, charCount: 0 });
+      state.queuedBytes += frame.data.byteLength;
+      this.updateBacklogWarning(sessionId, state);
       this.deliverPendingOutput(sessionId, state);
       return;
     }
     if (frame.replayBatchEnd) {
       state.frames.push({ frame, committed: false, charCount: 0 });
+      state.queuedBytes += frame.data.byteLength;
+      this.updateBacklogWarning(sessionId, state);
       this.deliverPendingOutput(sessionId, state);
       return;
     }
     if (frame.sequence <= state.latestCommittedSequence || state.sequences.has(frame.sequence)) return;
     state.sequences.add(frame.sequence);
     state.frames.push({ frame, committed: false, charCount: 0 });
+    state.queuedBytes += frame.data.byteLength;
+    this.updateBacklogWarning(sessionId, state);
     this.deliverPendingOutput(sessionId, state);
   }
 
@@ -265,6 +326,7 @@ export class TerminalProcessManager {
     while (state.frames[0]?.committed) {
       const [queued] = state.frames.splice(0, 1);
       state.sequences.delete(queued.frame.sequence);
+      state.queuedBytes = Math.max(0, state.queuedBytes - queued.frame.data.byteLength);
       state.deliveredCount = Math.max(0, state.deliveredCount - 1);
       state.latestCommittedSequence = Math.max(
         state.latestCommittedSequence,
@@ -273,6 +335,38 @@ export class TerminalProcessManager {
       if (queued.frame.kind !== "reset" && !queued.frame.replayBatchEnd) {
         ptyHostSocket.acknowledge(sessionId, queued.frame.sequence, queued.charCount);
       }
+    }
+    this.updateBacklogWarning(sessionId, state);
+  }
+
+  private updateBacklogWarning(sessionId: string, state: TerminalOutputState): void {
+    const thresholdExceeded =
+      state.queuedBytes >= OUTPUT_BACKLOG_WARN_BYTES
+      || state.frames.length >= OUTPUT_BACKLOG_WARN_FRAMES;
+    if (thresholdExceeded && !state.backlogWarned) {
+      state.backlogWarned = true;
+      writeResourceDiagnostic("warn", "terminalProcessManager", "backlogThresholdExceeded", {
+        area: "terminalProcessManager",
+        sessionId,
+        queuedFrames: state.frames.length,
+        queuedBytes: state.queuedBytes,
+        consumerAttached: state.consumer !== null,
+        deliveredFrames: state.deliveredCount,
+      });
+      return;
+    }
+    const recovered =
+      state.queuedBytes < OUTPUT_BACKLOG_RECOVERY_BYTES
+      && state.frames.length < OUTPUT_BACKLOG_RECOVERY_FRAMES;
+    if (state.backlogWarned && recovered) {
+      state.backlogWarned = false;
+      writeResourceDiagnostic("info", "terminalProcessManager", "backlogRecovered", {
+        area: "terminalProcessManager",
+        sessionId,
+        queuedFrames: state.frames.length,
+        queuedBytes: state.queuedBytes,
+        consumerAttached: state.consumer !== null,
+      });
     }
   }
 

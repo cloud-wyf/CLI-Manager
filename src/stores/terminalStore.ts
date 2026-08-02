@@ -34,6 +34,7 @@ import {
 import { useProjectStore } from "./projectStore";
 import { useSshHostStore } from "./sshHostStore";
 import { useSshAgentIntegrationStore } from "./sshAgentIntegrationStore";
+import { createGitDiffWorkspaceContext, useGitDiffWorkspaceStore } from "./gitDiffWorkspaceStore";
 import { resolveCliSessionRebind } from "./terminalCliSession";
 import { inferHookBindingSource, resolveCliHookTarget } from "./terminalHookBinding";
 import { buildSshConnectionSpec, type SshConnectionSpecPayload } from "../lib/ssh";
@@ -278,6 +279,11 @@ interface TerminalStore {
   updateSessionRemoteHandoff: (sessionId: string, handoff: RemoteHandoffSessionState) => Promise<void>;
   resumeSessionFromRemoteHandoff: (sessionId: string) => Promise<string>;
   restorePersistedRemoteHandoffSessions: () => void;
+  bindRemoteCliSessionIdentity: (
+    sessionId: string,
+    cliSessionId: string,
+    remoteHistorySourceInstanceId?: string,
+  ) => Promise<boolean>;
   recordPtyOutputActivity: (sessionId: string) => void;
   markAttentionInputHandled: (sessionId: string) => void;
   handleCliHookEvent: (payload: CliHookPayload) => string | null;
@@ -325,11 +331,12 @@ interface TerminalStore {
 let restoreInProgress = false;
 let sshSessionPersistenceQueue = Promise.resolve();
 
-function queueSshSessionPersistence(sessions: TerminalSession[]): void {
+function queueSshSessionPersistence(sessions: TerminalSession[]): Promise<void> {
   const snapshot = sessions.map((session) => ({ ...session }));
   sshSessionPersistenceQueue = sshSessionPersistenceQueue
     .catch(() => {})
     .then(() => useSessionStore.getState().saveSessions(snapshot));
+  return sshSessionPersistenceQueue;
 }
 
 function basenameFromPath(path: string | null | undefined): string | null {
@@ -550,6 +557,11 @@ function normalizePathForCompare(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/g, "");
 }
 
+function normalizeRemotePathForCompare(path: string): string {
+  const normalized = path.trim().replace(/\/{2,}/g, "/").replace(/\/+$/g, "");
+  return normalized || "/";
+}
+
 function isSameTranscriptPath(a: string | null, b: string | null): boolean {
   if (!a || !b) return false;
   return normalizePathForCompare(a) === normalizePathForCompare(b);
@@ -655,7 +667,11 @@ function shouldSubscribeSubagentSource(previous: SubagentTranscriptSource | unde
 
 function shouldAttemptDerivedChildTranscript(payload: CliHookPayload, source: SubagentTranscriptSource): boolean {
   if (payload.source !== "claude" || source.kind === "child-jsonl") return false;
-  return Boolean(trimOptional(payload.agentId) && trimOptional(payload.cwd) && trimOptional(payload.sessionId));
+  return Boolean(
+    trimOptional(payload.agentId)
+    && trimOptional(payload.sessionId)
+    && (trimOptional(payload.cwd) || trimOptional(source.parentTranscriptPath))
+  );
 }
 
 function stopSubagentTranscriptRetry(sessionId: string, reason: string) {
@@ -1061,7 +1077,7 @@ function getCurrentTerminalColors() {
     settings.darkThemePalette,
   );
   return {
-    foreground: normalizeHexColor(theme.foreground, "#d8dee9"),
+    foreground: normalizeHexColor(settings.terminalTextColor || theme.foreground, "#d8dee9"),
     background: normalizeHexColor(
       theme.background,
       settings.resolvedTheme === "dark" ? "#0c0e10" : "#ffffff",
@@ -1634,8 +1650,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       ? projectState.projects.find((item) => item.id === lockedSession.projectId)
       : undefined;
     if (!project) throw new Error("remote_handoff_project_missing");
+    const sshHandoff = lockedSession.remoteHandoff.transport === "ssh"
+      || project.environment_type === "ssh";
     if (
       lockedSession.worktreeId
+      && !sshHandoff
       && !projectState.worktrees.some((worktree) => (
         worktree.id === lockedSession.worktreeId
         && worktree.project_id === project.id
@@ -1644,23 +1663,55 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     ) {
       throw new Error("remote_handoff_worktree_missing");
     }
+    if (sshHandoff && lockedSession.worktreeId) {
+      throw new Error("handoff_ssh_worktree_unsupported");
+    }
+    if (sshHandoff && project.environment_type !== "ssh") {
+      throw new Error("remote_handoff_ssh_project_mismatch");
+    }
+    const recordedSshHostId = lockedSession.remoteHandoff.sshHostId?.trim()
+      || lockedSession.sshHostId?.trim()
+      || "";
+    if (
+      sshHandoff
+      && (!recordedSshHostId || project.ssh_host_id?.trim() !== recordedSshHostId)
+    ) {
+      throw new Error("remote_handoff_ssh_host_mismatch");
+    }
+    const recordedRemotePath = lockedSession.remoteHandoff.remotePath?.trim()
+      || lockedSession.remoteHandoff.workDir.trim()
+      || lockedSession.remotePath?.trim()
+      || "";
+    if (
+      sshHandoff
+      && (
+        !recordedRemotePath
+        || normalizeRemotePathForCompare(project.remote_path)
+          !== normalizeRemotePathForCompare(recordedRemotePath)
+      )
+    ) {
+      throw new Error("remote_handoff_ssh_path_mismatch");
+    }
 
     const os = await getOsPlatform();
-    const resolvedShell = resolveShellForPty(lockedSession.shell, true, os);
-    const shellKey = normalizeShellKey(resolvedShell) ?? null;
-    const providerProject = resolveProjectForProviderLaunch(
-      project,
-      projectState.worktrees,
-      lockedSession.worktreeId
-    );
+    let resumeProject = project;
+    let providerProject = project;
+    let codexProvider: ReturnType<typeof getCodexProviderLaunchConfig> = null;
     const recordedProviderId = lockedSession.remoteHandoff.providerId?.trim() || null;
-    let resumeProject = providerProject;
-    let codexProvider = getCodexProviderLaunchConfig(
-      lockedSession.projectId,
-      lockedSession.startupCmd,
-      lockedSession.worktreeId
-    );
-    if (recordedProviderId) {
+    if (!sshHandoff) {
+      providerProject = resolveProjectForProviderLaunch(
+        project,
+        projectState.worktrees,
+        lockedSession.worktreeId
+      );
+      resumeProject = providerProject;
+      codexProvider = getCodexProviderLaunchConfig(
+        lockedSession.projectId,
+        lockedSession.startupCmd,
+        lockedSession.worktreeId
+      );
+    }
+    if (!sshHandoff && recordedProviderId) {
       const settings = useSettingsStore.getState();
       const prepared = await invoke<CodexProviderProfileResponse>(
         "ccswitch_prepare_codex_provider",
@@ -1694,21 +1745,50 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       lockedSession.remoteHandoff.cliSessionId || lockedSession.cliSessionId,
       resumeProject
     );
-    const launchStartupCmd = prepareStartupCommandForPty(resumeCommand, shellKey);
-    const newSessionId = await terminalProcessManager.create({
-      cwd: lockedSession.remoteHandoff.workDir || lockedSession.cwd || null,
-      envVars: buildPtyEnvVars(lockedSession.envVars ?? null, resolvedShell),
-      shell: resolvedShell,
-      hookEnvEnabled: await shouldEnableHookEnv(),
-      claudeProvider: null,
-      codexProvider,
-      terminalColors: getCurrentTerminalColors(),
-      sshLaunch: null,
-    });
+    const launch: ResolvedPtyLaunch = sshHandoff
+      ? await resolvePtyLaunch({
+          projectId: project.id,
+          sshHostId: recordedSshHostId,
+          cwd: recordedRemotePath,
+          startupCmd: resumeCommand,
+          envVars: lockedSession.envVars,
+          shell: null,
+        }, os)
+      : (() : ResolvedPtyLaunch => {
+          const resolvedShell = resolveShellForPty(lockedSession.shell, true, os);
+          return {
+            shell: resolvedShell,
+            startupCmd: prepareStartupCommandForPty(
+              resumeCommand,
+              normalizeShellKey(resolvedShell) ?? null
+            ),
+            startupHandledByLaunch: false,
+            invokeArgs: {
+              cwd: lockedSession.remoteHandoff?.workDir || lockedSession.cwd || null,
+              envVars: buildPtyEnvVars(lockedSession.envVars ?? null, resolvedShell),
+              shell: resolvedShell,
+              hookEnvEnabled: false,
+              claudeProvider: null,
+              codexProvider,
+              terminalColors: getCurrentTerminalColors(),
+              sshLaunch: null,
+            },
+          };
+        })();
+    if (!sshHandoff) {
+      launch.invokeArgs.hookEnvEnabled = await shouldEnableHookEnv();
+    }
+    const newSessionId = await terminalProcessManager.create(launch.invokeArgs);
     const replacement: TerminalSession = {
       ...lockedSession,
       id: newSessionId,
-      shell: resolvedShell,
+      createdAtMs: Date.now(),
+      shell: launch.shell,
+      environmentType: launch.environmentType ?? lockedSession.environmentType,
+      sshHostId: launch.sshHostId ?? lockedSession.sshHostId,
+      remotePath: launch.remotePath ?? lockedSession.remotePath,
+      connectionState: sshHandoff ? "connecting" : lockedSession.connectionState,
+      disconnectReason: undefined,
       remoteHandoff: undefined,
       initialTerminalOutput: undefined,
       deferStartupUntilInitialOutput: false,
@@ -1717,8 +1797,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       const status = payload.status as SessionStatus;
       logTerminalExitStatus(replacement, payload);
       useTerminalStore.setState((current) => ({
+        sessions: applyPtyStatusToSessions(current.sessions, newSessionId, payload),
         sessionStatuses: { ...current.sessionStatuses, [newSessionId]: status },
       }));
+      persistSshConnectionStateAfterPtyStatus(newSessionId, payload);
+      if (status === "exited" || status === "error") {
+        releaseRemoteHistoryConsumer(replacement);
+      }
     }).catch(async (err) => {
       await terminalProcessManager.close(newSessionId).catch(() => {});
       throw err;
@@ -1770,11 +1855,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       logError("Failed to persist resumed remote handoff session", { sessionId, newSessionId, err });
     }
 
-    if (launchStartupCmd) {
+    if (launch.startupCmd && !launch.startupHandledByLaunch) {
+      const shellKey = normalizeShellKey(launch.shell) ?? null;
       setTimeout(() => {
         terminalProcessManager.write(
           newSessionId,
-          formatStartupInputForPty(launchStartupCmd, shellKey),
+          formatStartupInputForPty(launch.startupCmd as string, shellKey),
         ).catch((err) => {
           logError("Failed to resume remotely handed-off Codex session", {
             sessionId: newSessionId,
@@ -1811,6 +1897,37 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     set({ sessions, ...mirror, sessionStatuses });
   },
 
+  bindRemoteCliSessionIdentity: async (
+    sessionId,
+    cliSessionId,
+    remoteHistorySourceInstanceId,
+  ) => {
+    const normalizedId = cliSessionId.trim();
+    if (!normalizedId || /\s/.test(normalizedId)) return false;
+    const state = get();
+    const current = state.sessions.find((session) => session.id === sessionId);
+    if (!current || current.environmentType !== "ssh") return false;
+    if (current.cliSessionId && current.cliSessionId !== normalizedId) return false;
+    if (state.sessions.some((session) => (
+      session.id !== sessionId && session.cliSessionId?.trim() === normalizedId
+    ))) return false;
+    const normalizedSourceInstanceId = remoteHistorySourceInstanceId?.trim() || undefined;
+    const sessions = get().sessions.map((session) => (
+      session.id === sessionId
+        ? {
+            ...session,
+            cliSessionId: normalizedId,
+            ...(normalizedSourceInstanceId
+              ? { remoteHistorySourceInstanceId: normalizedSourceInstanceId }
+              : {}),
+          }
+        : session
+    ));
+    set({ sessions });
+    await queueSshSessionPersistence(sessions);
+    return true;
+  },
+
   recordPtyOutputActivity: (sessionId) => {
     const now = Date.now();
     const previous = get().ptyOutputActivityAt[sessionId] ?? 0;
@@ -1825,6 +1942,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
   createSession: async (projectId, cwd, title, startupCmd, envVars, shell, paneId, worktreeId, sshHostId, cliSessionId, remoteHistoryConsumerId, remoteHistorySourceInstanceId) => {
     const os = await getOsPlatform();
+    const createdAtMs = Date.now();
     let launch: ResolvedPtyLaunch;
     let sessionId: string;
     try {
@@ -1853,6 +1971,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const launchStartupCmd = launch.startupCmd;
     const session: TerminalSession = {
       id: sessionId,
+      createdAtMs,
       projectId,
       worktreeId,
       title: title ?? "Terminal",
@@ -2033,6 +2152,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     } finally {
       releaseRemoteHistoryConsumer(closingSession);
       if (isFileEditor) {
+        const project = closingSession?.fileEditor?.project;
+        if (project) {
+          useGitDiffWorkspaceStore.getState().clearWorkspace(
+            createGitDiffWorkspaceContext(project).key,
+          );
+        }
         return;
       }
       if (isTranscript) {
@@ -2224,6 +2349,17 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           };
         }),
       }));
+      const boundSession = get().sessions.find((session) => session.id === tabId);
+      const persistedSession = useSessionStore.getState().sessions.find((session) => session.id === tabId);
+      const persistedCliSessionRebind = resolveCliSessionRebind(persistedSession?.cliSessionId, cliSessionId);
+      if (persistedCliSessionRebind.changed || boundSession?.environmentType === "ssh") {
+        void queueSshSessionPersistence(get().sessions).catch((error) => {
+          logWarn("Failed to persist CLI session identity", {
+            sessionId: tabId,
+            error,
+          });
+        });
+      }
     }
     const updatedAt = payload.timestamp ?? new Date().toISOString();
     const status = mapCliHookEvent(payload.event);
@@ -2252,10 +2388,15 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     }
     set((state) => {
       const next = buildTabStatusUpdate(state, tabId, "hook", status, updatedAt);
-      if (status !== "done" && status !== "failed") return next;
+      const terminalOutputStopped = status === "done" || status === "failed";
+      const ptyOutputActivityAt = terminalOutputStopped
+        ? { ...state.ptyOutputActivityAt }
+        : null;
+      if (ptyOutputActivityAt) delete ptyOutputActivityAt[tabId];
+      if (!terminalOutputStopped) return next;
 
       const tabStatus = next.tabStatuses[tabId];
-      if (!tabStatus?.shell) return next;
+      if (!tabStatus?.shell) return { ...next, ptyOutputActivityAt: ptyOutputActivityAt! };
       const resolved: TabStatusSources = { ...tabStatus };
       delete resolved.shell;
       delete resolved.shellUpdatedAt;
@@ -2263,6 +2404,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         tabStatuses: { ...next.tabStatuses, [tabId]: resolved },
         tabNotifications: { ...next.tabNotifications, [tabId]: getTabStatusEntry(resolved) },
         tabStatusDetails: { ...next.tabStatusDetails, [tabId]: getTabStatusDetails(resolved) },
+        ptyOutputActivityAt: ptyOutputActivityAt!,
       };
     });
     return tabId;
@@ -2272,6 +2414,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const tabId = resolvePrimaryTabId(payload.sessionId, get().splits);
     const session = get().sessions.find((item) => item.id === tabId);
     if (!session || !isShellRuntimeMonitoringEnabled()) return null;
+    const project = session.projectId
+      ? useProjectStore.getState().projects.find((item) => item.id === session.projectId)
+      : undefined;
+    // Agent processes such as Codex and SSH stay alive across many turns. Their
+    // shell lifecycle cannot represent turn state; Hook events are authoritative.
+    if (resolveAgentTerminalMetadata(session, project).isAgentSession) return null;
     // 回车猜测只对 cmd 生效：cmd 无法注入 C 序列，输入侧猜测是它唯一的
     // command_started 信号；其余 shell 由 OSC 133/633/777 驱动，猜测只会误判
     // （多行输入、TUI 内回车、历史命令均不可靠）。
@@ -2420,6 +2568,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
     const splitSession: TerminalSession = {
       id: splitSessionId,
+      createdAtMs: Date.now(),
       projectId: options?.projectId,
       worktreeId: options?.worktreeId,
       title: createSplitSessionTitle(options),
@@ -2494,6 +2643,26 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const editorSessionId = createFileEditorSessionId(project.id);
     const existing = get().sessions.find((session) => session.id === editorSessionId);
     if (existing) {
+      const previousProject = existing.fileEditor?.project;
+      if (previousProject) {
+        const previousContext = createGitDiffWorkspaceContext(previousProject);
+        const nextContext = createGitDiffWorkspaceContext(project);
+        if (previousContext.key !== nextContext.key) {
+          useGitDiffWorkspaceStore.getState().clearWorkspace(previousContext.key);
+        }
+      }
+      const sessions = get().sessions.map((session) => session.id === editorSessionId ? {
+        ...session,
+        projectId: project.id,
+        title: `文件：${project.name}`,
+        fileEditor: {
+          projectId: project.id,
+          projectPath: project.path,
+          projectName: project.name,
+          project,
+        },
+      } : session);
+      set({ sessions });
       get().setActive(editorSessionId);
       return editorSessionId;
     }
@@ -2836,6 +3005,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
             const attachedMeta = resolveAttachedDaemonSession(ps, daemonSession);
             const attachedSession: TerminalSession = {
               id: ps.id,
+              createdAtMs: daemonSession.createdAtMs ?? ps.createdAtMs,
               projectId: attachedMeta.projectId,
               worktreeId: attachedMeta.worktreeId,
               title: attachedMeta.title,
@@ -2897,7 +3067,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           continue;
         }
         // 检查路径是否有效
-        if (!projectHealth[ps.projectId]) {
+        if (project.environment_type !== "ssh" && projectHealth[ps.projectId] === false) {
           // 路径无效但仍创建终端，显示警告
           toast.warning(`项目路径无效: ${project.name}`, {
             description: `路径 ${project.path} 不存在，终端可能无法正常工作`,
@@ -2963,6 +3133,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       const hasInitialOutput = !!initialTerminalOutput;
       const restoredSession: TerminalSession = {
         id: newSessionId,
+        createdAtMs: Date.now(),
         projectId: ps.projectId,
         worktreeId: ps.worktreeId,
         title: ps.title,
@@ -3108,6 +3279,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const attachedMeta = resolveAttachedDaemonSession(persisted, daemonSession);
     const session: TerminalSession = {
       id: sessionId,
+      createdAtMs: daemonSession.createdAtMs ?? persisted?.createdAtMs,
       projectId: attachedMeta.projectId,
       worktreeId: attachedMeta.worktreeId,
       title: attachedMeta.title,
@@ -3311,6 +3483,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         const result = await invoke<SubagentTranscriptSubscribeResult>("subagent_transcript_subscribe", {
           key: pseudoId,
           transcriptPath: source.transcriptPath,
+          parentTranscriptPath: source.parentTranscriptPath ?? null,
           cwd: payload.cwd ?? null,
           sessionId: payload.sessionId ?? null,
           agentId,
@@ -3347,6 +3520,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         const result = await invoke<SubagentTranscriptSubscribeResult>("subagent_transcript_subscribe", {
           key: pseudoId,
           transcriptPath: null,
+          parentTranscriptPath: source.parentTranscriptPath ?? null,
           cwd: payload.cwd ?? null,
           sessionId: payload.sessionId ?? null,
           agentId,
@@ -3466,6 +3640,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         const result = await invoke<SubagentTranscriptSubscribeResult>("subagent_transcript_subscribe", {
           key: pseudoId,
           transcriptPath: discoveredPath,
+          parentTranscriptPath: source.parentTranscriptPath ?? null,
           cwd: payload.cwd ?? null,
           sessionId: payload.sessionId ?? null,
           agentId,

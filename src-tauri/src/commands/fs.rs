@@ -9,6 +9,7 @@ use memchr::memmem;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use crate::app_paths::cli_manager_data_dir;
 use crate::file_watcher::FileWatcherBridge;
 use crate::shell_resolver::silent_command;
 use crate::text_encoding::{decode_text, encode_text};
@@ -709,13 +710,8 @@ pub async fn file_copy(
 }
 
 #[tauri::command]
-pub async fn file_attach_data(
-    root_path: String,
-    file_name: String,
-    data_base64: String,
-) -> Result<String, String> {
+pub async fn file_attach_data(file_name: String, data_base64: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
         let data = general_purpose::STANDARD
             .decode(data_base64)
             .map_err(|err| format!("decode_failed: {err}"))?;
@@ -726,21 +722,22 @@ pub async fn file_attach_data(
             return Err("attachment_too_large".into());
         }
 
-        let attachments_dir = ensure_attachment_dir(&root)?;
+        let data_dir = cli_manager_data_dir()?;
+        let attachments_dir = ensure_attachment_dir(&data_dir)?;
         let file_name = sanitize_attachment_file_name(&file_name);
         let target = unique_attachment_target(&attachments_dir, &file_name)?;
         fs::write(&target, data).map_err(|err| format!("write_file_failed: {err}"))?;
-        relative_from_root(&root, &target)
+        Ok(target.to_string_lossy().into_owned())
     })
     .await
     .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
-pub async fn file_cleanup_expired_attachments(root_path: String) -> Result<u64, String> {
+pub async fn file_cleanup_expired_attachments() -> Result<u64, String> {
     tokio::task::spawn_blocking(move || {
-        let root = canonical_root(&root_path)?;
-        cleanup_expired_attachments(&root, Duration::from_secs(ATTACHMENT_RETENTION_SECS))
+        let data_dir = cli_manager_data_dir()?;
+        cleanup_expired_attachments(&data_dir, Duration::from_secs(ATTACHMENT_RETENTION_SECS))
     })
     .await
     .map_err(|err| err.to_string())?
@@ -945,17 +942,19 @@ fn ensure_plain_dir(path: &Path) -> Result<(), String> {
     }
 }
 
-fn ensure_attachment_dir(root: &Path) -> Result<PathBuf, String> {
-    let cli_manager_dir = root.join(".cli-manager");
-    ensure_plain_dir(&cli_manager_dir)?;
-    let attachments_dir = cli_manager_dir.join("attachments");
+fn ensure_attachment_dir(data_dir: &Path) -> Result<PathBuf, String> {
+    ensure_plain_dir(data_dir)?;
+    let canonical_data_dir = data_dir
+        .canonicalize()
+        .map_err(|err| format!("path_canonicalize_failed: {err}"))?;
+    let attachments_dir = data_dir.join("attachments");
     ensure_plain_dir(&attachments_dir)?;
-    ensure_existing_child_within_root(root, &attachments_dir)?;
+    ensure_existing_child_within_root(&canonical_data_dir, &attachments_dir)?;
     Ok(attachments_dir)
 }
 
-fn get_existing_attachment_dir(root: &Path) -> Result<Option<PathBuf>, String> {
-    let attachments_dir = root.join(".cli-manager").join("attachments");
+fn get_existing_attachment_dir(data_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let attachments_dir = data_dir.join("attachments");
     match fs::symlink_metadata(&attachments_dir) {
         Ok(metadata) => {
             if is_symlink_or_reparse(&metadata) {
@@ -964,7 +963,10 @@ fn get_existing_attachment_dir(root: &Path) -> Result<Option<PathBuf>, String> {
             if !metadata.is_dir() {
                 return Err("path_not_directory".into());
             }
-            ensure_existing_child_within_root(root, &attachments_dir)?;
+            let canonical_data_dir = data_dir
+                .canonicalize()
+                .map_err(|err| format!("path_canonicalize_failed: {err}"))?;
+            ensure_existing_child_within_root(&canonical_data_dir, &attachments_dir)?;
             Ok(Some(attachments_dir))
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -972,8 +974,8 @@ fn get_existing_attachment_dir(root: &Path) -> Result<Option<PathBuf>, String> {
     }
 }
 
-fn cleanup_expired_attachments(root: &Path, max_age: Duration) -> Result<u64, String> {
-    let Some(attachments_dir) = get_existing_attachment_dir(root)? else {
+fn cleanup_expired_attachments(data_dir: &Path, max_age: Duration) -> Result<u64, String> {
+    let Some(attachments_dir) = get_existing_attachment_dir(data_dir)? else {
         return Ok(0);
     };
     let now = SystemTime::now();
@@ -1359,6 +1361,18 @@ fn collect_content_matches_in_file(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn attachment_directory_is_directly_under_cli_manager_data_dir() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join(".cli-manager");
+
+        let attachments_dir = ensure_attachment_dir(&data_dir).unwrap();
+
+        assert_eq!(attachments_dir, data_dir.join("attachments"));
+        assert!(attachments_dir.is_dir());
+        assert!(!data_dir.join(".cli-manager").exists());
+    }
 
     #[test]
     fn preview_limits_reject_video_and_oversized_image_dimensions() {

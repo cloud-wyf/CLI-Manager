@@ -1,3 +1,94 @@
+# SSH NVM Codex 启动环境修复验证（2026-07-28）
+
+## 根因与发现清单
+
+- 根因位于本机 SSH Proxy 到远端 Codex 的进程启动边界：普通 SSH 终端使用交互式登录 Shell，能通过用户启动脚本加载 NVM；托管代理此前使用非交互登录 Shell `-lc`，远端因此返回 `codex: command not found`，cc-connect 最终只显示“无法连接远端 Codex app-server”。修复落在 `SshCodexLaunch::remote_command`，使代理与终端使用相同的用户环境发现规则。
+- 远端启动改为交互式登录 Shell `-lic`，但 Shell 初始化阶段的 stdout 全部导向 stderr；仅在执行 `codex app-server` 时恢复原始 stdout，避免 `.bashrc` banner、NVM 初始化输出或其他 profile 文本污染 JSON-RPC 流。
+- 代码触点确认：`SshCodexLaunch::remote_command` 负责远端命令构造；预检和正式托管共用该启动计划，因此同时修复；OpenSSH 参数、AskPass 凭据、Provider 注入、Git `safe.directory`、取消托管恢复和 cc-connect 源码均未改动。
+- 运行场景确认：NVM、fnm/asdf 等依赖交互式 Shell 初始化的用户工具路径可被发现；系统 PATH 中已有 Codex 的主机保持兼容；有无初始化输出均由 stdout 隔离保护协议；认证方式、跳板/代理、窗口焦点、分屏及桌宠显示状态不改变该启动逻辑。
+- `SshCodexLaunch.remote_command` 属于预检和正式托管共享的 CRITICAL 调用面；本次只调整远端 Shell 启动与文件描述符路由，并通过真实 SSH 探测、单元测试和代理端到端测试复核。
+
+## 验证结果
+
+- 真实 SSH 只读探测通过：非交互登录 Shell 无法找到 NVM 中的 Codex；交互式登录 Shell 能解析远端 Codex 0.145.0，并且 app-server 在 stdin EOF 后以状态 0 退出。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml codex_app_server_proxy::tests --lib`：13 项通过。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml commands::cc_connect:: --lib`：57 项通过。
+- `npm run test:codex-proxy:e2e`：4 项通过。
+- `cargo fmt --check --manifest-path src-tauri/Cargo.toml`、`cargo check --locked --manifest-path src-tauri/Cargo.toml`：通过。
+- `npm run tauri:build:local -- --bundles nsis`：通过，仅生成 NSIS；安装包为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.1_x64-setup.exe`，17,502,968 字节，SHA-256 `798516D71D8C1F10DAA26892C343C3F3A498C4693573E45FF18FC4C18BF39539`。
+
+## 未覆盖与测试边界
+
+- 已验证真实 SSH、远端目录和 Codex app-server 启动，但未使用真实 Telegram/飞书/微信/企业微信消息完成“手机消息 -> 远端 Codex -> 回复”全链路；需由安装包复测消息平台侧行为。
+- 本次未复制安装包、未停止用户服务、未修改 cc-connect 源码或全局安装。
+
+---
+
+# 桌宠 Agent 状态与 SSH 托管身份修复验证（2026-07-27）
+
+## 根因与发现清单
+
+- 根因位于终端运行态与 Agent 回合态的聚合边界：`codex` 及其 SSH 进程会跨多个回合长期存活，Shell OSC 和 PTY 重绘只能证明进程/终端有活动，不能证明当前 Agent 回合仍在执行；修复因此落在 `terminalStore` 状态生产与桌宠状态聚合层，由 Hook/daemon 回合事件保持权威，PTY 输出只允许短暂补充空状态。
+- SSH 托管不可选的另一根因位于终端身份绑定边界：远端 Hook 未回传 `cliSessionId` 时，桌宠直接过滤了该会话，后端代理没有机会接收原远端线程 ID；修复保留可恢复候选，并通过已登记 SSH Agent 的远端历史做唯一、限时、非空、SSH Codex 且排除其他打开终端已占用 ID 的匹配，零匹配或多匹配均拒绝。
+- 安装包复测仍失败的根因同样位于身份绑定边界，但只发生在 `codex resume --last`：上一版只能提取显式 Session ID，`--last` 被当成新会话并错误套用创建时间窗口。运行日志在 22:22:47、22:23:11 返回 `remote_handoff_ssh_session_not_found`，只读历史库同时确认目标项目的最近会话已更新但创建时间早于终端启动。本次将启动命令分类为新建、显式恢复、`--last` 和交互选择；`--last` 只绑定项目范围内更新时间唯一最新且未被其他终端占用的 SSH Codex 会话，交互选择和并列结果继续失败关闭。
+- 状态触点已覆盖：`handleShellRuntimeEvent`、`handleCliHookEvent`、PTY 输出活动、daemon 状态、桌宠快照与传输指纹；终端创建、分屏、恢复及 daemon attach 均保留 PTY 创建时间。
+- 托管触点已覆盖：资格判断、远端历史同步、唯一身份选择、Zustand 绑定与持久化、桌宠平台/会话二级菜单、中英文状态与错误提示。
+- 确认无须修改：cc-connect 源码及全局安装、Rust Codex proxy、托管启动/取消协议、SSH 凭据和 Provider 注入链；现有后端仍只接收经过前端严格绑定的原 `cliSessionId`。
+- 场景复核：本地 Agent 仍要求可信停止态；SSH 无 Hook 空闲态可尝试唯一识别；已知 `running`/`attention`、WSL、SSH Worktree、交互认证、缺失 Host 均继续拒绝；多终端通过已占用 ID 和歧义检测防串线。窗口焦点、分屏位置、最小化/托盘不参与身份选择。
+- codebase-memory 已用 `moderate` 模式刷新，抽查确认新状态解析入口只由桌宠快照调用，新 SSH 身份解析只由托管协调器调用；`terminalStore` 与远端历史/托管主流程仍属于 HIGH/CRITICAL 风险调用面，因此采用失败关闭和独立回归测试。GitNexus CLI 因 npx 包缺少 `tree-sitter-kotlin` 无法建立本地索引，已按规范降级为 codebase-memory 调用路径分析、SSH 契约、源码与 Git diff 复核。
+
+## 验证结果
+
+- `node scripts/desktopPetStatus.test.mjs`：3 项通过，覆盖完成/失败/审批状态不被后续 PTY 输出重开，以及空状态活动提示过期。
+- `node scripts/resumeCliArgs.test.mjs`：7 项通过，覆盖新会话、显式 Session ID、`resume --last` 和交互选择分类，并回归原参数清理/恢复命令构造。
+- `node scripts/sshCodexSessionBinding.test.mjs`：8 项通过，覆盖新会话限时唯一匹配、显式旧会话恢复、`--last` 旧会话恢复，以及旧/空/本地/已占用/并列/交互选择拒绝。
+- `node scripts/remoteHandoff.test.mjs`：4 项通过，覆盖缺失 ID 时先阻止运行态、SSH 空闲态进入身份恢复及原资格矩阵。
+- `node scripts/desktopPetTransport.test.mjs`：4 项通过，桌宠可见托管状态纳入传输指纹。
+- `.\node_modules\.bin\tsc.cmd --noEmit`、`npm run build`、`cargo fmt --check --manifest-path src-tauri/Cargo.toml`、`cargo check --locked --manifest-path src-tauri/Cargo.toml`：通过。
+- `cargo test --locked --manifest-path src-tauri/ssh-agent/Cargo.toml`：70 项通过；仅有未修改测试模块的既有 unused-import 警告。
+- `npm run tauri:build:local -- --bundles nsis`：通过，仅生成 NSIS；安装包为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.1_x64-setup.exe`，17,505,631 字节，SHA-256 `6E56F5FE2E3CAF44139F58BA532264570FD772ACD6E02EE19F9D3193EDBEFC88`。
+
+## 未覆盖与测试边界
+
+- 已连接真实 SSH Codex 主机完成远端目录、Codex 发现和 app-server 启动探测；消息平台对话、远端历史唯一识别及取消恢复仍需使用安装包做一次完整链路冒烟。
+- 未启动桌面窗口手动切换中英文；新增键已由 `zh-CN`/`en-US` 类型约束和生产构建覆盖。
+
+---
+
+# SSH Codex 会话远程托管验证（2026-07-27）
+
+## 根因与发现清单
+
+- 桌面宠物把 SSH Codex 会话显示为“空闲”时，资格判断仍将缺少远端 Hook 的 `none` 状态解释为“状态未知”，因此按钮始终禁用；本次只对 SSH 放行该候选状态，已知 `running` / `attention`、本地未知状态和 WSL 行为保持不变。
+- 实测两个独立 Codex app-server 不能权威读取对方进程中的活动状态：第二个进程会返回 `idle` / `notLoaded`，提前 `thread/resume` 还可能把未结束 Turn 解释为中断。因此预检只验证 SSH 与 app-server 基础链路，不加载或恢复仍由桌面 PTY 持有的线程；已知运行态继续由现有状态链阻止，托管失败走现有本地恢复链。
+- 原托管资格、后端目录校验、Codex 启动和取消后恢复均只支持桌面本地目录/进程，没有携带 SSH Host、远端路径和认证信息；本次在原 cc-connect 托管链上增加本机 OpenSSH 传输，没有修改 cc-connect 源码或全局安装。
+- 新增 `cc_connect_handoff_preflight`，在释放原 PTY 前验证消息平台上下文、SSH 配置/凭据/远端目录和 Codex app-server。SSH 托管会话数据使用本地占位目录，真实 POSIX 路径仅作为远端 transport 元数据。
+- Codex Proxy 复用结构化 SSH Config、Agent、私钥、已保存密码、跳板机、HTTP/SOCKS5/ProxyCommand 和自定义 Config；远端注入项目环境、有效 `CODEX_HOME` 与登记目录的 Git 信任配置，序列化环境不包含密码。
+- Proxy 将远端 app-server 的任务开始、审批、完成和失败事件转入现有托管 Hook 通知链，Telegram、飞书、微信和企业微信共用同一实现，不要求远端安装 Hook。
+- 取消托管通过现有 SSH PTY 解析器在原 Host/路径恢复同一 `cliSessionId`；SSH 项目或路径发生漂移时进入可见的恢复失败状态。SSH Worktree、WSL、`password_prompt` 和 `interactive` 首版明确拒绝。
+- GitNexus CLI 因 npx 包缺少 `tree-sitter-kotlin` 失败；已降级刷新 codebase-memory moderate 索引并结合 SSH/PTY/Hook 契约、源码和测试完成影响复核。资格判断与 cc-connect/Proxy 启动链风险为 HIGH/CRITICAL。
+
+## 验证结果
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`：通过。
+- `cargo check --locked --manifest-path src-tauri/Cargo.toml`：通过。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml`：本功能相关测试全部通过；全量结果为 744 项通过、1 项忽略、1 项失败。唯一失败为未修改的既有 `commands::hook_settings::tests::install_then_uninstall_pi_extension`，单独执行可稳定复现，与 SSH/cc-connect/Proxy 调用链无关。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml codex_app_server_proxy::tests --lib`：13 项通过。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml commands::cc_connect:: --lib`：57 项通过，包含跳板 Host 缺失时禁止退化为直连的回归测试。
+- `node scripts/remoteHandoff.test.mjs`：4 项通过，覆盖 SSH 无 Hook 空闲候选、已知运行态拒绝、Host/认证/Worktree 拒绝、WSL 拒绝及本地兼容。
+- `npm run test:codex-proxy:e2e`：4 项通过。
+- `.\\node_modules\\.bin\\tsc.cmd --noEmit`：通过。
+- `npm run build`：通过，Vite 完成 6696 个模块转换。
+- `git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
+
+## 未覆盖与发布边界
+
+- 已使用真实 SSH 主机验证已保存密码链路、远端目录及 Codex app-server 启动；尚未执行真实手机消息 -> 远端 Codex -> 取消后本地恢复的端到端冒烟，安装包测试仍应覆盖 Agent、私钥、跳板/代理和 Host Key 异常。
+- 未启动 Tauri 窗口手动切换中英文；新增文案已由 TypeScript 完整键约束和生产构建覆盖。
+- `npm run tauri:build:local -- --bundles nsis`：通过，仅构建 NSIS；产物为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.1_x64-setup.exe`。本次未复制安装包、未停止用户服务、未 push。
+
+---
+
 # cc-connect 首版验证
 
 日期：2026-07-15
@@ -701,3 +792,43 @@
 - GitNexus `detect-changes` 因本地没有该仓库索引而不可用；降级刷新 codebase-memory moderate 索引并执行工作区变更检测，确认仅涉及 `desktop_pet_window_sync` 及预期的 CHANGELOG、验证记录。
 - `npm run tauri:build:local -- --bundles nsis`：通过，仅构建 NSIS；安装包为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.1_x64-setup.exe`，大小 17,093,981 字节，SHA-256 为 `51956099BB6246982D1FE7E64A4B9C321A0AF795E24BB5332D1306A654B037C0`。
 - 自动化验证无法直接断言 Windows Explorer 的任务栏缩略图状态，冷启动、关闭后重开及任务栏/Alt+Tab 表现需用本安装包在受影响的 Windows 11 机器上冒烟确认。
+
+## SSH 历史会话详情身份校验修复（2026-07-28）
+
+### 根因与发现清单
+
+- 根因位于历史列表与详情的前端身份校验边界：SSH 缓存列表和远端详情按协议都将本地 `file_path` 留空，但新加入的共享校验要求文件路径非空，因此合法 SSH 详情在后端完成远端身份验证后仍会被前端固定拒绝为 `history_session_identity_mismatch`。
+- 已修改 `src/lib/historySessionIdentity.ts`：本地/WSL 继续严格比较 source、session id 和规范化文件路径；只有双方都是 SSH 时才改用完整稳定 `session_ref`，并校验其 source、source instance、source session 和 transport 与顶层身份一致。
+- 已修改 `scripts/historySessionIdentity.test.mjs` 与前端历史契约，覆盖无本地文件路径的正常 SSH 详情，以及实例变化、缺少引用、传输类型混用和引用字段漂移的拒绝路径。
+- 已复核但未修改 `historyStore.openSession`、`historyStore.openSearchHit`、`HistoryWorkspace` 恢复按钮、Rust `history_remote_get_session`、远端 SSH Agent `history::get` 和远端历史目录；后端已有完整远端身份验证，问题只发生在响应返回后的共享前端守卫。
+- codebase-memory 入向影响分析标记为 CRITICAL：共享函数同时控制详情打开、搜索命中、收藏快照回退和恢复按钮，因此修复保留非 SSH 语义并保持缺失/漂移身份 fail-closed。
+
+### 场景覆盖与验证结果
+
+- SSH 列表详情、搜索结果详情和恢复按钮接受同一完整远端会话引用；离线收藏快照只有保留相同 SSH 引用时才可回退。
+- 本地、WSL、转换会话仍必须提供相同非空文件路径；旧的空路径对象不会因本次修复被放行。
+- `node scripts/historySessionIdentity.test.mjs`：5 项通过。
+- `node scripts/historyConversionState.test.mjs`：3 项通过。
+- `node scripts/historyListRefreshState.test.mjs`：4 项通过。
+- `node scripts/historyResumeProject.test.mjs`：3 项通过。
+- `node scripts/remoteHandoff.test.mjs`：4 项通过。
+- `npx tsc --noEmit`、`npm run build`、`git diff --check`：通过。
+- 尚未连接真实 SSH 主机点击截图中的历史记录做交互冒烟；该项需由安装包或开发模式连接真实远端验证。
+
+## SSH 主机目录选择器响应优化（2026-07-28）
+
+### 根因与发现清单
+
+- 根因位于 SSH 目录选择器的传输边界：项目路径与 CLI 配置目录两个选择器仍直接调用 `ssh_list_directories`，每进入一级目录都会启动新的 OpenSSH 进程并重复握手，也没有复用已读取目录；此前的 SSH 文件树优化没有覆盖这两个入口。
+- 新增 `sshRemoteDirectories` 与 `useSshDirectoryBrowser`：已安装兼容 SSH Agent 时复用现有只读 bridge，未安装、不可用或返回受限结果时保持原有 OpenSSH 查询；目录结果使用 96 项 LRU 上限，显式刷新绕过缓存。
+- 已修改 `ConfigModal` 与 `SshCliIntegrationDialog` 两个真实入口，统一接入缓存、请求序号和关闭/切换取消逻辑；旧请求不能覆盖新路径，关闭后不会继续触发新的回退连接。
+- 已复核但未修改 `ssh_list_directories`、`ssh_remote_file_list`、daemon 的只读 lane、远端 Agent 文件协议和 consumer 释放命令；本次不改变认证、代理、跳板机、路径校验或已发布 Agent 协议。
+
+### 场景覆盖与验证结果
+
+- Agent 已安装时，同一次选择器浏览只支付首次 SSH 握手；返回上级或重复进入目录直接命中缓存，刷新按钮强制重新读取。Agent 未安装、版本不兼容、daemon 不可用或目录条目达到 Agent 上限时继续使用原 OpenSSH 路径。
+- 项目目录与 CLI 配置目录、根目录与多级目录、快速连续切换、加载中关闭、切换主机、密钥/Agent/凭据引用/SSH Config/代理/跳板机均复用原结构化连接参数；交互式认证仍按既有契约拒绝无 PTY 浏览。
+- `npx tsc --noEmit`：通过。
+- `npm run build`：通过，完成 6702 个模块转换。
+- `git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
+- 尚未连接真实高延迟 SSH 主机做首次握手与后续逐级浏览的耗时对比；需在开发模式或安装包中完成实际网络冒烟。

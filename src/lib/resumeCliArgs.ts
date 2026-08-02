@@ -3,6 +3,12 @@ interface CliArgToken {
   normalized: string;
 }
 
+export type CodexLaunchSessionSelection =
+  | { kind: "new" }
+  | { kind: "explicit"; sessionId: string }
+  | { kind: "last" }
+  | { kind: "interactive" };
+
 function tokenizeCliArgs(cliArgs: string): CliArgToken[] {
   const tokens: CliArgToken[] = [];
   let index = 0;
@@ -90,6 +96,71 @@ function takesSeparateOptionValue(token: CliArgToken): boolean {
     return false;
   }
   return CODEX_RESUME_VALUE_OPTIONS.has(optionName(token));
+}
+
+function unquoteCliArg(token: CliArgToken): string {
+  const value = token.raw.trim();
+  if (value.length < 2) return value;
+  const first = value[0];
+  const last = value[value.length - 1];
+  return (first === "\"" && last === "\"") || (first === "'" && last === "'")
+    ? value.slice(1, -1)
+    : value;
+}
+
+function isCodexCommandToken(token: CliArgToken): boolean {
+  const value = unquoteCliArg(token).replace(/\\/g, "/").toLowerCase();
+  const executable = value.slice(value.lastIndexOf("/") + 1);
+  return executable === "codex"
+    || executable === "codex.exe"
+    || executable === "codex.cmd"
+    || executable === "codex.bat";
+}
+
+export function detectCodexLaunchSessionSelection(
+  command: string | null | undefined,
+): CodexLaunchSessionSelection {
+  const tokens = tokenizeCliArgs(command ?? "");
+  const resumeIndex = tokens.findIndex((token, index) => (
+    token.normalized === "resume"
+    && tokens.slice(0, index).some(isCodexCommandToken)
+  ));
+  if (resumeIndex < 0) return { kind: "new" };
+
+  let selectsLast = false;
+
+  for (let index = resumeIndex + 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.raw === "--") continue;
+
+    const name = optionName(token);
+    if (name === "--last") {
+      selectsLast = true;
+      continue;
+    }
+    if (CODEX_RESUME_SELECTION_OPTIONS.has(name)) continue;
+    if (isOptionToken(token)) {
+      if (takesSeparateOptionValue(token)) index += 1;
+      continue;
+    }
+
+    const sessionId = unquoteCliArg(token);
+    if (!sessionId || /[\s\0\r\n]/.test(sessionId) || selectsLast) {
+      return { kind: "interactive" };
+    }
+    return { kind: "explicit", sessionId };
+  }
+
+  return selectsLast ? { kind: "last" } : { kind: "interactive" };
+}
+
+/**
+ * Extract the explicit target from a `codex resume <session-id>` command.
+ * Selector-only forms such as `resume --last` intentionally return null.
+ */
+export function extractCodexResumeSessionId(command: string | null | undefined): string | null {
+  const selection = detectCodexLaunchSessionSelection(command);
+  return selection.kind === "explicit" ? selection.sessionId : null;
 }
 
 function stripCodexResumeTail(tokens: CliArgToken[], start: number): string[] {

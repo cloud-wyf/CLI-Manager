@@ -253,12 +253,15 @@ export const HISTORY_SOURCE_DESCRIPTORS: readonly HistorySourceDescriptor[] = [
     labelKey: "historySources.source.pi",
     defaultLabel: "Pi",
     locations: [sessionRootSlot],
-    capabilities: jsonReaderCapabilities,
+    capabilities: {
+      ...jsonReaderCapabilities,
+      resume: "supported",
+    },
     parserPlan: {
       stage: "native",
       batch: "batch-3",
       writer: "planned",
-      note: "Read-only parser for ~/.pi/agent/sessions/**/*.jsonl session files.",
+      note: "Read-only parser for ~/.pi/agent/sessions/**/*.jsonl; local resume uses pi --session <session-id>.",
     },
   },
   {

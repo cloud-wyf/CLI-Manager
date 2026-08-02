@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Project, ProjectFileContentMatch, ProjectFileEntry, ProjectFilePreviewKind } from "./types";
-import { buildSshAgentHistoryContext, type SshAgentHistoryContext } from "./sshAgentHistory";
+import { buildSshAgentProjectLaunch, type SshAgentProjectLaunch } from "./sshAgentHistory";
 import { useBackgroundOperationStore } from "../stores/backgroundOperationStore";
 import type { TranslationKey } from "./i18n";
 
@@ -23,7 +23,7 @@ interface RemoteFileRead {
 
 export interface SshRemoteFileContext {
   consumerId: string;
-  launch: SshAgentHistoryContext["launch"];
+  launch: SshAgentProjectLaunch;
   rootPath: string;
 }
 
@@ -63,22 +63,66 @@ async function runFileOperation<T>(
 }
 
 export async function buildSshRemoteFileContext(project: Project): Promise<SshRemoteFileContext> {
-  const history = await buildSshAgentHistoryContext(project);
+  const launch = await buildSshAgentProjectLaunch(project);
   return {
-    consumerId: history.consumerId.replace(/^history:/, "files:"),
+    consumerId: `files:${launch.clientInstanceId}:${launch.hostId}:${project.id}`,
     launch: {
-      ...history.launch,
+      ...launch,
       bridgeEpoch: crypto.randomUUID(),
     },
     rootPath: project.remote_path.trim(),
   };
 }
 
+export type SshRemoteAttachmentInput =
+  | { kind: "data"; fileName: string; dataBase64: string }
+  | { kind: "localPath"; path: string };
+
 export async function releaseSshRemoteFileContext(context: SshRemoteFileContext): Promise<void> {
   await invoke("history_remote_close", {
     hostId: context.launch.hostId,
     consumerId: context.consumerId,
   });
+}
+
+export async function sshRemoteAttachFiles(
+  project: Project,
+  sessionId: string,
+  inputs: SshRemoteAttachmentInput[],
+): Promise<string[]> {
+  if (inputs.length === 0) return [];
+  const context = await buildSshRemoteFileContext(project);
+  context.consumerId = [
+    "attachments",
+    context.launch.clientInstanceId,
+    context.launch.hostId,
+    sessionId,
+    crypto.randomUUID(),
+  ].join(":");
+  try {
+    const paths: string[] = [];
+    for (const input of inputs) {
+      const common = {
+        consumerId: context.consumerId,
+        sshLaunch: context.launch,
+        sessionId,
+      };
+      const path = input.kind === "data"
+        ? await invoke<string>("ssh_remote_file_attach_data", {
+            ...common,
+            fileName: input.fileName,
+            dataBase64: input.dataBase64,
+          })
+        : await invoke<string>("ssh_remote_file_attach_path", {
+            ...common,
+            localPath: input.path,
+          });
+      paths.push(path);
+    }
+    return paths;
+  } finally {
+    await releaseSshRemoteFileContext(context).catch(() => undefined);
+  }
 }
 
 export async function sshRemoteListDir(

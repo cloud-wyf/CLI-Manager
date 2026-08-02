@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { logInfo, logWarn } from "../../lib/logger";
+import { writeResourceDiagnostic } from "../../lib/resourceDiagnosticsLog";
 
 const BINARY_PROTOCOL_VERSION = 1;
 const BINARY_KIND_OUTPUT = 1;
@@ -19,6 +20,9 @@ const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_TIMEOUT_MS = 15_000;
 const AUTH_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+const OUTPUT_BACKLOG_WARN_BYTES = 4 * 1024 * 1024;
+const OUTPUT_BACKLOG_WARN_FRAMES = 1024;
+const DIAGNOSTIC_SESSION_LIMIT = 5;
 
 interface PtyHostEndpoint {
   transportMode: "websocket" | "legacy";
@@ -89,6 +93,29 @@ export interface PtyHostStatusEvent {
 type OutputListener = (frame: TerminalBinaryFrame) => void;
 type StatusListener = (event: PtyHostStatusEvent) => void;
 
+export interface PtyHostDiagnosticsSnapshot {
+  transportMode: "websocket" | "legacy" | null;
+  socketReadyState: number | null;
+  attachedSessions: number;
+  closedSessions: number;
+  pendingRequests: number;
+  pendingCheckpoints: number;
+  pendingOutputSessions: number;
+  pendingOutputFrames: number;
+  pendingOutputBytes: number;
+  outputListenerSessions: number;
+  outputListeners: number;
+  statusListenerSessions: number;
+  statusListeners: number;
+  reconnectTimerActive: boolean;
+  heartbeatTimerActive: boolean;
+  topPendingOutput: Array<{
+    sessionId: string;
+    queuedFrames: number;
+    queuedBytes: number;
+  }>;
+}
+
 function checkpointKey(sessionId: string, sequence: number): string {
   return `${sessionId}:${sequence}`;
 }
@@ -130,6 +157,8 @@ export class PtyHostSocket {
   private readonly outputListeners = new Map<string, Set<OutputListener>>();
   private readonly statusListeners = new Map<string, Set<StatusListener>>();
   private readonly pendingOutput = new Map<string, TerminalBinaryFrame[]>();
+  private readonly pendingOutputBytes = new Map<string, number>();
+  private readonly pendingOutputWarned = new Set<string>();
   private readonly pendingStatus = new Map<string, PtyHostStatusEvent>();
   private readonly pendingCheckpoints = new Map<string, {
     resolve: () => void;
@@ -260,6 +289,8 @@ export class PtyHostSocket {
   async closeAll(): Promise<void> {
     this.attachedSessions.forEach((sessionId) => this.closedSessions.add(sessionId));
     this.pendingOutput.clear();
+    this.pendingOutputBytes.clear();
+    this.pendingOutputWarned.clear();
     this.pendingStatus.clear();
     this.pendingCheckpoints.forEach(({ reject, timeoutId }) => {
       window.clearTimeout(timeoutId);
@@ -326,9 +357,7 @@ export class PtyHostSocket {
       replayBatch.forEach((frame) => listeners.forEach((listener) => listener(frame)));
       return;
     }
-    const pending = this.pendingOutput.get(sessionId) ?? [];
-    pending.push(...replayBatch);
-    this.pendingOutput.set(sessionId, pending);
+    this.enqueuePendingOutput(sessionId, replayBatch);
   }
 
   subscribeOutput(sessionId: string, listener: OutputListener): () => void {
@@ -340,7 +369,7 @@ export class PtyHostSocket {
     listeners.add(listener);
     const pending = this.pendingOutput.get(sessionId);
     if (pending?.length) {
-      this.pendingOutput.delete(sessionId);
+      this.clearPendingOutput(sessionId);
       queueMicrotask(() => pending.forEach(listener));
     }
     return () => {
@@ -379,6 +408,34 @@ export class PtyHostSocket {
       sequence,
       char_count: charCount,
     });
+  }
+
+  diagnosticsSnapshot(): PtyHostDiagnosticsSnapshot {
+    const pendingSessions = [...this.pendingOutput.entries()].map(([sessionId, frames]) => ({
+      sessionId,
+      queuedFrames: frames.length,
+      queuedBytes: this.pendingOutputBytes.get(sessionId) ?? 0,
+    }));
+    return {
+      transportMode: this.transportMode,
+      socketReadyState: this.socket?.readyState ?? null,
+      attachedSessions: this.attachedSessions.size,
+      closedSessions: this.closedSessions.size,
+      pendingRequests: this.pendingRequests.size,
+      pendingCheckpoints: this.pendingCheckpoints.size,
+      pendingOutputSessions: pendingSessions.length,
+      pendingOutputFrames: pendingSessions.reduce((total, session) => total + session.queuedFrames, 0),
+      pendingOutputBytes: pendingSessions.reduce((total, session) => total + session.queuedBytes, 0),
+      outputListenerSessions: this.outputListeners.size,
+      outputListeners: [...this.outputListeners.values()].reduce((total, listeners) => total + listeners.size, 0),
+      statusListenerSessions: this.statusListeners.size,
+      statusListeners: [...this.statusListeners.values()].reduce((total, listeners) => total + listeners.size, 0),
+      reconnectTimerActive: this.reconnectTimer !== null,
+      heartbeatTimerActive: this.heartbeatTimer !== null,
+      topPendingOutput: pendingSessions
+        .sort((left, right) => right.queuedBytes - left.queuedBytes || right.queuedFrames - left.queuedFrames)
+        .slice(0, DIAGNOSTIC_SESSION_LIMIT),
+    };
   }
 
   getLatestCommittedSequence(sessionId: string): number {
@@ -718,11 +775,46 @@ export class PtyHostSocket {
   private emitOutputFrame(frame: TerminalBinaryFrame): void {
     const listeners = this.outputListeners.get(frame.sessionId);
     if (listeners?.size) listeners.forEach((listener) => listener(frame));
-    else {
-      const pending = this.pendingOutput.get(frame.sessionId) ?? [];
-      pending.push(frame);
-      this.pendingOutput.set(frame.sessionId, pending);
+    else this.enqueuePendingOutput(frame.sessionId, [frame]);
+  }
+
+  private enqueuePendingOutput(sessionId: string, frames: TerminalBinaryFrame[]): void {
+    if (frames.length === 0) return;
+    const pending = this.pendingOutput.get(sessionId) ?? [];
+    pending.push(...frames);
+    this.pendingOutput.set(sessionId, pending);
+    const queuedBytes = (this.pendingOutputBytes.get(sessionId) ?? 0)
+      + frames.reduce((total, frame) => total + frame.data.byteLength, 0);
+    this.pendingOutputBytes.set(sessionId, queuedBytes);
+    const thresholdExceeded =
+      queuedBytes >= OUTPUT_BACKLOG_WARN_BYTES
+      || pending.length >= OUTPUT_BACKLOG_WARN_FRAMES;
+    if (thresholdExceeded && !this.pendingOutputWarned.has(sessionId)) {
+      this.pendingOutputWarned.add(sessionId);
+      writeResourceDiagnostic("warn", "ptyHostSocket", "backlogThresholdExceeded", {
+        area: "ptyHostSocket",
+        sessionId,
+        queuedFrames: pending.length,
+        queuedBytes,
+        outputListeners: this.outputListeners.get(sessionId)?.size ?? 0,
+      });
     }
+  }
+
+  private clearPendingOutput(sessionId: string): void {
+    const queuedFrames = this.pendingOutput.get(sessionId)?.length ?? 0;
+    const queuedBytes = this.pendingOutputBytes.get(sessionId) ?? 0;
+    this.pendingOutput.delete(sessionId);
+    this.pendingOutputBytes.delete(sessionId);
+    if (this.pendingOutputWarned.has(sessionId)) {
+      writeResourceDiagnostic("info", "ptyHostSocket", "backlogCleared", {
+        area: "ptyHostSocket",
+        sessionId,
+        queuedFrames,
+        queuedBytes,
+      });
+    }
+    this.pendingOutputWarned.delete(sessionId);
   }
 
   private async ensureLegacyListeners(): Promise<void> {
@@ -909,7 +1001,7 @@ export class PtyHostSocket {
 
   private clearSession(sessionId: string): void {
     this.attachedSessions.delete(sessionId);
-    this.pendingOutput.delete(sessionId);
+    this.clearPendingOutput(sessionId);
     this.pendingStatus.delete(sessionId);
     [...this.pendingCheckpoints.entries()]
       .filter(([key]) => key.startsWith(`${sessionId}:`))
@@ -925,11 +1017,7 @@ export class PtyHostSocket {
 
   private lifecycleSnapshot(extra: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      transportMode: this.transportMode,
-      attachedSessions: this.attachedSessions.size,
-      pendingRequests: this.pendingRequests.size,
-      pendingCheckpoints: this.pendingCheckpoints.size,
-      reconnectTimerActive: this.reconnectTimer !== null,
+      ...this.diagnosticsSnapshot(),
       ...extra,
     };
   }

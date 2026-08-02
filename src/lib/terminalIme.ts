@@ -1,7 +1,18 @@
 import type { RefObject } from "react";
 import type { Terminal } from "@xterm/xterm";
-import { TUI_BORDER_CHAR_PATTERN, TUI_BORDER_PREFIX_PATTERN } from "./terminalTui";
 import type { OsPlatform } from "./shell";
+import {
+  resolveTerminalImeCompositionAnchor,
+  type TerminalImeAnchor,
+  type TerminalImeAnchorResolver,
+  type TerminalImeTextareaAnchorResolver,
+} from "./terminalImeAnchor";
+
+export type {
+  TerminalImeAnchor,
+  TerminalImeAnchorResolver,
+  TerminalImeTextareaAnchorResolver,
+} from "./terminalImeAnchor";
 
 const IME_PROCESS_KEY_CODE = 229;
 const IME_PROCESS_KEY_RECOVERY_WINDOW_MS = 400;
@@ -31,6 +42,9 @@ export interface TerminalImeControllerOptions {
   updateSuggestionPosition: () => void;
   scheduleFit: (force?: boolean) => void;
   onCompositionCommitted: (textareaValue: string) => void;
+  resolveCompositionAnchor?: TerminalImeAnchorResolver;
+  resolveTextareaAnchor?: TerminalImeTextareaAnchorResolver;
+  shouldRefreshCompositionAnchor?: () => boolean;
 }
 
 export const attachTerminalIme = ({
@@ -46,6 +60,9 @@ export const attachTerminalIme = ({
   updateSuggestionPosition,
   scheduleFit,
   onCompositionCommitted,
+  resolveCompositionAnchor,
+  resolveTextareaAnchor,
+  shouldRefreshCompositionAnchor,
 }: TerminalImeControllerOptions) => {
   const textarea = container.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
   const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
@@ -62,7 +79,7 @@ export const attachTerminalIme = ({
   let compositionAnchorTimeoutId: number | null = null;
   let compositionEndCleanupTimerId: number | null = null;
   let compositionScrollLock: { element: HTMLElement; scrollTop: number; scrollLeft: number }[] = [];
-  let compositionAnchorCell: { x: number; y: number } | null = null;
+  let compositionAnchorCell: TerminalImeAnchor | null = null;
 
   const captureCompositionScroll = () => {
     compositionScrollLock = [container, viewport]
@@ -114,80 +131,14 @@ export const attachTerminalIme = ({
   };
 
   const resolveCompositionAnchorCell = () => {
-    const buffer = terminal.buffer.active;
-    const inputPromptPattern = /^(?:[>$#\u203a\u276f\u00bb\u2023]|PS(?:\s|>))/u;
-    const clampX = (x: number) => Math.min(Math.max(0, x), Math.max(0, terminal.cols - 1));
-    const clampY = (y: number) => Math.min(Math.max(0, y), Math.max(0, terminal.rows - 1));
-    const cursor = {
-      x: clampX(buffer.cursorX),
-      y: clampY(buffer.cursorY),
-    };
-    const rowText = (row: number) => {
-      const line = buffer.getLine(buffer.viewportY + row);
-      return line ? line.translateToString(true) : null;
-    };
-    const rowIsPromptRow = (row: number) => {
-      const text = rowText(row);
-      if (text === null) return false;
-      const trimmed = text.trimStart().replace(TUI_BORDER_PREFIX_PATTERN, "");
-      return Boolean(trimmed) && inputPromptPattern.test(trimmed);
-    };
-    const rowIsHorizontalRule = (row: number) => {
-      const text = rowText(row);
-      if (text === null) return false;
-      const trimmed = text.trim();
-      return trimmed.length > 0 && /^[─━═╌╍┄┅┈┉╴╶]+$/u.test(trimmed);
-    };
-    const anchorAtRowTextEnd = (row: number) => {
-      const line = buffer.getLine(buffer.viewportY + row);
-      if (!line) return { x: 0, y: clampY(row) };
-      for (let x = Math.min(terminal.cols, line.length) - 1; x >= 0; x -= 1) {
-        const cell = line.getCell(x);
-        const chars = cell?.getChars().trim();
-        if (!cell || !chars || TUI_BORDER_CHAR_PATTERN.test(chars)) continue;
-        return { x: clampX(x + Math.max(1, cell.getWidth())), y: clampY(row) };
-      }
-      const text = line.translateToString(true);
-      const indent = text.length - text.replace(/^\s+/u, "").length;
-      return { x: clampX(indent > 0 ? indent : 1), y: clampY(row) };
-    };
+    const fallbackAnchor = resolveTerminalImeCompositionAnchor(terminal);
+    return resolveCompositionAnchor?.(terminal, fallbackAnchor) ?? fallbackAnchor;
+  };
 
-    for (let row = terminal.rows - 1; row >= 0; row -= 1) {
-      if (!rowIsPromptRow(row)) continue;
-
-      let ruleRow = terminal.rows;
-      for (let nextRow = row + 1; nextRow < terminal.rows; nextRow += 1) {
-        if (rowIsHorizontalRule(nextRow)) {
-          ruleRow = nextRow;
-          break;
-        }
-      }
-      const boxBottom = Math.max(row, ruleRow - 1);
-      for (let nextRow = row; nextRow <= boxBottom; nextRow += 1) {
-        const line = buffer.getLine(buffer.viewportY + nextRow);
-        if (!line) continue;
-        const width = Math.min(terminal.cols, line.length);
-        for (let x = 0; x < width; x += 1) {
-          const cell = line.getCell(x);
-          if (cell && cell.isInverse() !== 0) {
-            return { x: clampX(x), y: clampY(nextRow) };
-          }
-        }
-      }
-
-      if (ruleRow >= terminal.rows && cursor.y >= row) return cursor;
-
-      let lastContentRow = row;
-      for (let nextRow = row + 1; nextRow <= boxBottom; nextRow += 1) {
-        if ((rowText(nextRow) ?? "").trim().length > 0) lastContentRow = nextRow;
-      }
-      const anchorRow = lastContentRow === row ? row : boxBottom;
-      return anchorRow === row && cursor.y === row
-        ? cursor
-        : anchorAtRowTextEnd(anchorRow);
+  const refreshCompositionAnchorIfNeeded = () => {
+    if (shouldRefreshCompositionAnchor?.()) {
+      compositionAnchorCell = resolveCompositionAnchorCell();
     }
-
-    return cursor;
   };
 
   const applyCompositionAnchorFix = () => {
@@ -195,9 +146,12 @@ export const attachTerminalIme = ({
     const compositionView = container.querySelector(".composition-view") as HTMLElement | null;
     if (!textarea && !compositionView) return;
     const anchor = compositionAnchorCell ?? resolveCompositionAnchorCell();
+    const textareaAnchor = resolveTextareaAnchor?.(terminal, anchor) ?? anchor;
     const cell = estimateCellSize();
     const left = String(Math.max(0, anchor.x * cell.width)) + "px";
     const top = String(Math.max(0, anchor.y * cell.height)) + "px";
+    const textareaLeft = String(Math.max(0, textareaAnchor.x * cell.width)) + "px";
+    const textareaTop = String(Math.max(0, textareaAnchor.y * cell.height)) + "px";
     const height = String(Math.max(1, cell.height)) + "px";
     const maxWidth = String(Math.max(1, terminal.cols - anchor.x) * cell.width) + "px";
     if (compositionView) {
@@ -212,8 +166,8 @@ export const attachTerminalIme = ({
       const width = compositionBounds && compositionBounds.width > 0
         ? compositionBounds.width
         : Math.max(1, cell.width);
-      textarea.style.left = left;
-      textarea.style.top = top;
+      textarea.style.left = textareaLeft;
+      textarea.style.top = textareaTop;
       textarea.style.width = String(width) + "px";
       textarea.style.height = height;
       textarea.style.lineHeight = height;
@@ -241,9 +195,10 @@ export const attachTerminalIme = ({
   const pinHelperTextareaAnchor = () => {
     if (!textarea || isComposingRef.current) return;
     const anchor = resolveCompositionAnchorCell();
+    const textareaAnchor = resolveTextareaAnchor?.(terminal, anchor) ?? anchor;
     const cell = estimateCellSize();
-    textarea.style.left = String(Math.max(0, anchor.x * cell.width)) + "px";
-    textarea.style.top = String(Math.max(0, anchor.y * cell.height)) + "px";
+    textarea.style.left = String(Math.max(0, textareaAnchor.x * cell.width)) + "px";
+    textarea.style.top = String(Math.max(0, textareaAnchor.y * cell.height)) + "px";
     textarea.style.opacity = "0";
     textarea.style.width = "1px";
     textarea.style.height = String(Math.max(1, cell.height)) + "px";
@@ -304,6 +259,7 @@ export const attachTerminalIme = ({
   };
   const onImeProcessKeyDown = (event: KeyboardEvent) => {
     if (!isHelperTextareaEvent(event) || event.keyCode !== IME_PROCESS_KEY_CODE || event.ctrlKey || event.altKey || event.metaKey) return;
+    pinHelperTextareaAnchor();
     lastImeProcessKeyAt = nowForImeInput();
   };
   const onCompositionStart = () => {
@@ -321,6 +277,7 @@ export const attachTerminalIme = ({
     scheduleCompositionAnchorFix();
   };
   const onCompositionUpdate = () => {
+    refreshCompositionAnchorIfNeeded();
     scheduleCompositionScrollRestore();
     scheduleCompositionAnchorFix();
   };
@@ -351,6 +308,7 @@ export const attachTerminalIme = ({
     if (!isActiveRef.current) return;
     if (isComposingRef.current) {
       clearSuggestion();
+      refreshCompositionAnchorIfNeeded();
       scheduleCompositionScrollRestore();
       scheduleCompositionAnchorFix();
       return;
@@ -366,6 +324,16 @@ export const attachTerminalIme = ({
       return;
     }
     clearSuggestion();
+    refreshCompositionAnchorIfNeeded();
+    scheduleCompositionScrollRestore();
+    scheduleCompositionAnchorFix();
+  });
+  const resizeDisposable = terminal.onResize(() => {
+    if (!isComposingRef.current) {
+      scheduleHelperTextareaAnchorPin();
+      return;
+    }
+    compositionAnchorCell = null;
     scheduleCompositionScrollRestore();
     scheduleCompositionAnchorFix();
   });
@@ -387,6 +355,7 @@ export const attachTerminalIme = ({
     container.removeEventListener("scroll", scheduleTerminalContainerScrollReset);
     cursorDisposable.dispose();
     renderDisposable.dispose();
+    resizeDisposable.dispose();
     if (compositionScrollRafId !== null) cancelAnimationFrame(compositionScrollRafId);
     if (containerScrollResetRafId !== null) cancelAnimationFrame(containerScrollResetRafId);
     if (helperTextareaAnchorRafId !== null) cancelAnimationFrame(helperTextareaAnchorRafId);

@@ -4,7 +4,7 @@
 
 Apply this contract when changing `cli-manager-ssh-agent`, shared SSH transport generation, one-shot Agent probes, Agent installation metadata, bridge framing, or the SSH Host CLI Integration status UI.
 
-The delivered scope includes explicit one-shot probe/install lifecycle, remote Claude/Codex Hook configuration, the one-shot Hook runtime, remote history/resume RPCs, and daemon-owned protocol `1.7` bridges per active SSH Host. Protocol 1.5 file RPCs remain read-only; protocol 1.7 Git RPCs expose the full Git panel through a dedicated serialized Git lane. Realtime/historical stats remain separate stages.
+The delivered scope includes explicit one-shot probe/install lifecycle, remote Claude/Codex Hook configuration, the one-shot Hook runtime, remote history/resume RPCs, and daemon-owned protocol `1.10` bridges per active SSH Host. Protocol 1.5 introduced read-only file RPCs; protocol 1.7 Git RPCs expose the full Git panel through a dedicated serialized Git lane, protocol 1.8 adds negotiated Diff generation options, protocol 1.9 adds bounded terminal image attachments outside project roots, and protocol 1.10 generalizes attachment upload to arbitrary regular files. Realtime/historical stats remain separate stages.
 
 ### Agent Release Identity
 
@@ -17,6 +17,12 @@ The delivered scope includes explicit one-shot probe/install lifecycle, remote C
   entries so Diff, stage, and guarded deletion receive valid repository-relative paths.
   Agent `0.1.4` keeps protocol `1.7` and adds exact Claude `AskUserQuestion` / Codex
   `request_user_input` Hook templates plus Codex `Notification` runtime admission.
+  Agent `0.1.5` reports protocol `1.8` and adds `gitDiffOptions` for fixed whitespace and
+  context generation options; legacy `gitDiff` remains the `exact+3` compatibility path.
+  Agent `0.1.6` reports protocol `1.9` and adds the negotiated `fileAttach` capability for
+  chunked terminal image uploads into the remote user's XDG cache. Agent `0.1.7` reports
+  protocol `1.10` and adds `fileAttachAny` for arbitrary regular files up to 20 MiB while
+  preserving the original safe basename.
 - The independent Agent release tag is exactly `ssh-agent-v<agent-version>`. Its signed manifest
   must carry that Agent version and point only to assets on that same tag.
 - Independent Agent releases are GitHub prereleases with `make_latest: false`. The desktop
@@ -35,6 +41,9 @@ The delivered scope includes explicit one-shot probe/install lifecycle, remote C
   HTTPS redirect targets may contain CDN-generated temporary query signatures, but still require
   a host, reject credentials/fragments, and remain bounded to three redirects. Manifest Minisign
   and Agent SHA-256 verification remain mandatory after redirect resolution.
+- Release workflows derive the desktop default manifest, UI installer URL, signed manifest artifact
+  URLs, and rendered shell installer from the validated `R2_PUBLIC_BASE_URL` build variable. GitHub
+  Release remains the fixed fallback, while local non-release builds retain the committed R2 origin.
 
 ## 2. Signatures
 
@@ -125,6 +134,26 @@ CLI_MANAGER_SSH_AGENT/1 <nonce>\n
 
 Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum frame size is 1 MiB.
 
+Protocol 1.9 terminal attachments use `fileAttachBegin`, `fileAttachChunk`,
+`fileAttachFinish`, and `fileAttachAbort`. Chunks contain at most 512 KiB before Base64 encoding,
+so every encoded request remains below the 1 MiB frame limit.
+
+Protocol 1.10 arbitrary-file attachments use the parallel `fileAttachAnyBegin`,
+`fileAttachAnyChunk`, `fileAttachAnyFinish`, and `fileAttachAnyAbort` request kinds. The separate
+capability keeps legacy image uploads usable with Agent 0.1.6 while allowing the daemon to reject
+unsupported arbitrary-file requests before writing a frame.
+
+Remote Git Diff responses contain:
+
+```rust
+GitFileDiffPayload {
+    content: String,
+    can_revert_hunks: bool,
+    byte_length: usize,
+    line_count: usize,
+}
+```
+
 ## 3. Contracts
 
 - Interactive PTY and one-shot execution must share authentication, port, config alias, timeout, KeepAlive, identity, AskPass, ProxyJump, and ProxyCommand generation.
@@ -139,6 +168,17 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 - Bridge `--protocol` is mandatory. A clean EOF before a frame starts is normal; a partial four-byte length or payload is a protocol error.
 - A healthy Agent must report protocol major 1 and minor 4 or newer. Minor 1 advertises `heartbeat`, `requestCancellation`, and `boundedBackpressure`; minor 3 adds remote history RPCs and `historyDetailChunks`; minor 4 adds `historyResumePreflight`. Older minor versions remain upgradeable but are not marked usable by the current desktop.
 - The full remote Git panel additionally requires protocol minor 7 and the explicit `gitFull` capability; capability absence blocks Git only and never falls back to local Git commands or the read-only lane.
+- Non-default remote Diff generation uses `gitDiffWithOptions` and requires the protocol-minor-8 `gitDiffOptions` capability. The daemon checks the negotiated capability before frame serialization. Default `exact+3` must use legacy `gitDiff` without an `options` field so Agents `0.1.1` through `0.1.4` remain compatible.
+- Remote file browsing and attachment upload require a valid SSH project plus an installed Agent, but never require a configured CLI tool, Hook integration, or history source. Their launch context must be built independently from the remote-history context; an empty `toolSource` is valid for these request-driven lanes.
+- The desktop first requests protocol-minor-10 `fileAttachAny` for every attachment so file contents are never inferred from the extension. If that capability is missing, only a valid legacy image within 5 MiB and 12 million pixels retries through protocol-minor-9 `fileAttach`. The daemon checks each negotiated capability before sending a frame; Agent 0.1.6 therefore continues accepting legacy images while unsupported arbitrary files return an actionable upgrade error instead of receiving a desktop-local path.
+- Arbitrary-file upload accepts any non-empty regular file up to 20 MiB without an extension or MIME allowlist. Directories and symlinks remain rejected. The Desktop checks metadata and then reads at most 20 MiB + 1 byte so a file-growth race cannot cause unbounded allocation. A basename must be 1–255 bytes, cannot be `.` / `..`, and cannot contain path separators, NUL, CR, or LF. Legacy `fileAttach` remains limited to PNG, JPG/JPEG, GIF, WebP, and BMP, 5 MiB, and 12 million pixels.
+- Begin declares byte length and SHA-256, chunks carry an exact monotonic offset, finish verifies length/hash and performs a same-directory atomic rename. Legacy images additionally verify dimensions and decodability. Abort, bridge shutdown, and failed finish remove partial files and empty per-upload directories.
+- Legacy images live at `${XDG_CACHE_HOME:-$HOME/.cache}/cli-manager-ssh-agent/attachments/<session-id>/<uuid>.<ext>`. Arbitrary files live at `.../<session-id>/<uuid>/<safe-original-basename>`, preserving the name without permitting traversal or collisions. Directories use `0700` and files `0600` on Unix. Attachments never enter the SSH project root; bounded cleanup removes files older than 48 hours without following symlinks.
+- Clipboard image objects, native clipboard file paths (including screenshot-tool temporary paths), context-menu paste, and native file drop use the same SSH attachment transport. Local terminals retain the existing local path behavior. Internal remote file-explorer drags already carry remote references and must not be uploaded again.
+- Agent Diff options accept only whitespace `exact | ignore-eol | ignore-all` and context `3 | 10 | 20`. Invalid fields or values are rejected at deserialization/validation; non-exact payloads always set `canRevertHunks=false`.
+- Every tracked, untracked, legacy, and option-aware Agent Diff response passes through one final payload gate. More than 768 KiB or 20000 Rust `str::lines()` is `git_diff_too_large`; never return a truncated patch or partial-revert capability.
+- `byteLength` and `lineCount` are additive response fields. New Desktop builds derive them when an older Agent omits them, so this does not require a new request kind or capability.
+- Diff limits apply to existing text handling only. Remote image, office, archive, audio, and video Diff are not introduced by `gitFull` or `gitDiffOptions`.
 - Desktop install and the HTTP(S) script consume the same schema-1 release manifest and Tauri updater Minisign trust root. The signature covers manifest bytes; the manifest pins channel, semantic version, protocol range, Linux target, URL, size, and SHA-256.
 - Release URLs default to HTTPS. HTTP requires explicit user opt-in, never permits embedded credentials, query strings, or fragments, and still requires a valid signature. Manifest, signature, and artifact downloads are bounded.
 - Install preview is read-only. Confirmation re-fetches and re-verifies the manifest before downloading or opening SSH, preventing a stale preview from authorizing different bytes.
@@ -150,6 +190,7 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 - Operation JSON is accepted only after strict marker, action, UUID, version, protocol, target, path, source, manifest URL, and SHA-256 validation. Arbitrary remote output is never persisted.
 - Hook config requests use the Host/tool `configuredConfigRoot`; empty means `$HOME/.claude` or `$HOME/.codex`. Inspect and preview never create directories. Confirmed install may create only a missing native default root; a missing custom root is rejected.
 - Hook reports return the configured and canonical roots, `configRootHash`, actual canonical config files, fingerprints, change actions, Agent installation/machine identity, and an installation record. The desktop validates every field before persisting `hook_record_json`.
+- Hook report `requiredEntries` is Agent-owned capability data, not a Desktop per-source constant. The Desktop accepts `1..=64`, requires `managedEntries <= requiredEntries`, and for an installed record requires its `managedEntries == requiredEntries`; this keeps old and new Agent Hook sets compatible without trusting unbounded remote counts.
 - A later inspect refresh preserves the last validated `HookInstallationRecord` for the same canonical root until explicit uninstall. Host-primary and project-override rows that resolve to the same Host/source/canonical root mirror the same Hook report so one physical installation cannot appear installed in one scope and absent in another.
 - Local Hook report persistence uses one backend-owned SQLite connection and one bounded transaction. Frontend SQL pool calls must not split `BEGIN`, mutations, and `COMMIT` across separate invocations. A failed root rotation or mirror update rolls back every affected integration row.
 - Claude JSON and Codex JSON/TOML are parsed structurally. Install normalizes only exact Agent-owned duplicates in place; uninstall removes only the exact path/source/event/owner/installation command. Unknown events and third-party fields, array order, matchers, symlinks, TOML comments, and user-owned `features.hooks = true` remain intact.
@@ -221,6 +262,8 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 | Required protocol minor/capability is absent | probe `incompatible` / bridge `ssh_agent_bridge_protocol_incompatible` |
 | Old bridge still owns the Host/client socket | retry `bridge_already_active` until takeover or cancellation |
 | SSH stderr indicates interactive authentication or Host Key action | stop background retry with a stable sanitized code |
+| Primary Hook/history lane has an empty `toolSource` | reject bridge creation; request path returns `ssh_agent_identity_required` |
+| Request-driven Readonly file/attachment or Git lane has an empty `toolSource` | accept it; Agent path, installation, machine, client, project, and bridge identities remain mandatory |
 | Hook batch sequence/latest/ACK mismatch | close bridge without advancing the cursor |
 | Remote continuation identity changes | `history_remote_identity_changed`; preserve the previous catalog rows |
 | Agent reinstall changes only `installationId` while machine/user/source/config-root stay stable | accept the same source instance and update catalog metadata atomically |
@@ -237,6 +280,11 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 | Remote image exceeds 5 MiB | `image_file_too_large` |
 | Remote raster image exceeds 12,000,000 pixels | `image_dimensions_too_large` |
 | Remote path has a known video extension | `video_preview_unsupported` |
+| Local attachment path is relative, a directory, or a symlink | `attachment_local_path_invalid`; read no bytes and send no Agent frame |
+| Attachment basename is empty, `.` / `..`, over 255 bytes, or contains a separator/control newline | `attachment_name_invalid`; create no cache entry |
+| Arbitrary attachment is empty or exceeds 20 MiB | `attachment_empty` / `attachment_too_large`; reject at both Desktop and Agent boundaries |
+| Agent lacks `fileAttachAny` | retry only a validated legacy image through `fileAttach`; otherwise return `ssh_agent_capability_missing:fileAttachAny` |
+| Attachment chunk offset, final size, or SHA-256 differs | stable `attachment_*_mismatch`; delete partial content and its empty upload directory |
 | Spool record is malformed or over 1 MiB | stable `hook_spool_record_*` error; preserve original spool |
 | Custom Hook config root is missing | `hook_config_root_missing` |
 | Deleted custom root has one valid matching Agent record during uninstall | use its canonical identity for no-op config cleanup and remove the record |
@@ -247,6 +295,7 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 | Another live Hook config transaction owns the root lock | `hook_config_locked` |
 | SSH multi-row write cannot obtain/commit its SQLite transaction | stable `ssh_database_begin_failed` / `ssh_database_commit_failed`; no partial mutation |
 | Hook report nested identity differs from top-level command input | `ssh_hook_report_invalid`; no write |
+| Hook report has zero or more than 64 required entries, or managed entries exceed required entries | `ssh_agent_hook_count_invalid`; no report persistence |
 | Explicit integration belongs to another source | `ssh_hook_integration_identity_changed`; no write |
 | SSH Config import exceeds 10000 hosts | `ssh_config_import_too_many_hosts`; no write |
 | Local Hook metadata remains write-locked after the bounded wait | `ssh_agent_hook_metadata_busy`; preserve all integration rows |
@@ -254,6 +303,9 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 | Spool JSONL was appended but meta is stale | rebuild count/bytes/next sequence before append |
 | Git request root differs from `SshLaunchPlan.remotePath` | `remote_git_root_mismatch`; do not open the Agent bridge |
 | Git capability `gitFull` is absent | `ssh_agent_capability_missing:gitFull`; do not downgrade to read-only or local Git |
+| Non-default Diff requested without `gitDiffOptions` | `ssh_agent_capability_missing:gitDiffOptions`; reject before writing to the Agent |
+| Diff context is not `3`, `10`, or `20` | `remote_git_diff_options_invalid`; do not execute Git |
+| Final Diff exceeds 768 KiB or 20000 lines | `git_diff_too_large`; no partial Patch response |
 | Untracked Git diff target is a symlink or directory | `remote_git_symlink_rejected`; do not follow or read the target |
 | Git status contains an ordinary untracked directory | enumerate its files with `--untracked-files=all`; never return a trailing-slash pseudo-file |
 | Git path list exceeds count or aggregate byte bound | `remote_git_paths_invalid` |
@@ -269,9 +321,17 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 - Good: a signed x64/aarch64 artifact is uploaded through stdin, self-checks from staging, atomically becomes `current`, and leaves the former version as `previous`.
 - Good: an existing custom install root is upgraded in place without needing to repeat `--install-dir` inside the Agent transaction.
 - Good: Claude and Codex Hooks use different roots; preview shows actual files, confirmation preserves third-party entries, and both tools can be removed independently.
+- Good: an Agent release adds a Hook template and increases `requiredEntries`; the Desktop accepts the bounded self-consistent report without a matching hardcoded count update.
+- Bad: hardcode Claude/Codex Hook counts in the Desktop validator; Agent template additions then make inspect, preview, and apply fail together.
 - Good: the desktop disconnects, events spool under the bound Host/client namespace, and reconnect replays each event at most once before ACK deletion.
 - Good: four Host bridges are connected, a fifth waits without starting SSH, and closing one Host releases a permit for the waiting Host.
 - Good: an SSH project file panel reuses its Host bridge, lists only canonical-root descendants, skips symlinks, and reads bounded UTF-8 text or supported image data URLs.
+- Good: an SSH project with no configured CLI tool opens an isolated Readonly bridge for file browsing and attachment upload while keeping its Agent installation and machine identity checks.
+- Good: a Unicode-named extensionless file below 20 MiB is stored as `<session>/<uuid>/<original-name>` and the terminal receives only that remote path.
+- Base: Agent 0.1.6 lacks `fileAttachAny`; a valid 5 MiB-or-smaller image retries through `fileAttach`, while a ZIP returns an update-required error.
+- Bad: infer file contents from `.png` and force the legacy image protocol; an arbitrary file with that suffix would be rejected despite the no-type-restriction contract.
+- Bad: fall back to pasting the desktop-local path when arbitrary upload is unsupported; the remote CLI cannot read it and may receive sensitive local path text.
+- Bad: apply the Primary Hook/history `toolSource` gate to every non-Git lane; generic file requests then fail with `ssh_agent_identity_required` before contacting an installed Agent.
 - Good: remote video, byte-size, and raster-pixel checks run before file reads and Base64 conversion; the desktop also prechecks directory metadata to avoid unnecessary RPCs.
 - Bad: relying only on WebView `<img>` sizing after a high-pixel image has already crossed the SSH bridge as Base64.
 - Good: an SSH terminal stats panel with a Hook session id and transcript ref reads only that bounded JSONL through the Agent, while stale/offline failures preserve the last bounded snapshot without local path fallback or full history discovery.
@@ -288,6 +348,11 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 - Good: while an SSH project is still building its Agent context, Git actions fail closed; once ready, `rootPath` equals the launch plan and only the dedicated Git lane is used.
 - Good: Agent repository validation allows the empty `repoPath` that identifies the configured root repository, while `validate_file_path` continues to reject an empty file path.
 - Good: an untracked `test/c.txt` is returned as that exact file path; a nested repository remains in repository enumeration and does not become a blank file row in its parent repository.
+- Good: Agent `0.1.4` receives field-compatible legacy `gitDiff` for `exact+3`; Agent `0.1.5` receives `gitDiffWithOptions` only after advertising `gitDiffOptions`.
+- Base: ignored whitespace removes every visible Hunk; return an empty payload with partial revert disabled instead of the legacy exact-mode empty-Diff error.
+- Good: an older Agent omits Diff metadata; Desktop derives it and still rejects content above the same hard limits.
+- Bad: return `remote_git_diff_too_large` on one path and `git_diff_too_large` on another, or truncate before enabling revert.
+- Bad: serialize a non-default Diff request before checking capabilities, or include `options` in a legacy request whose payload denies unknown fields.
 - Bad: let a missing SSH context make `createGitTransport` silently choose the local transport, or allow a symlinked untracked file to be read by `fs::read`.
 - Bad: validate an allowed-empty `repoPath` with the same non-empty path-segment check as file paths; the root repository then fails every Git read with `remote_git_path_invalid`.
 - Good: a replaced bridge briefly receives `bridge_already_active`, backs off, then takes ownership after the old Agent process removes its socket.
@@ -318,13 +383,17 @@ Frames use a four-byte big-endian length followed by UTF-8 JSON. The maximum fra
 - Assert Desktop `historyGet` payload encoding maps a missing transcript ref to the JSON string `""`, preserves a non-empty direct ref unchanged, and never emits JSON `null` for the Agent `String` field.
 - Assert remote-history complete-index reuse, force/scope/partial refresh routing, recent-first discovery, unchanged no-write behavior, shared-request consumer lifetime, main-metadata busy mapping, idempotent update, and rollback.
 - Assert protocol minor 4 resume capability and protocol minor 5 remote-file capability, structured Claude/Codex args, source/cwd validation, ownership claim/release, and implicit SSH Config username handling.
-- Assert remote file root/path confinement, symlink escape rejection, binary refusal, 1 MiB text and 5 MiB image limits, the exact 12,000,000-pixel boundary, video refusal, directory/search/visited limits, image data URLs, request-driven read-only scheduling, primary Hook-poll exclusion, loaded-directory reuse, consumer release, and UI/store read-only routing.
+- Assert remote file root/path confinement, symlink escape rejection, binary refusal, 1 MiB text and 5 MiB image limits, the exact 12,000,000-pixel boundary, video refusal, directory/search/visited limits, image data URLs, request-driven read-only scheduling, Primary-only `toolSource` enforcement, empty-source Readonly/Git admission, primary Hook-poll exclusion, loaded-directory reuse, consumer release, and UI/store read-only routing.
 - Assert protocol minor 7 and `gitFull`, dedicated Git-lane serialization and identity isolation, exact launch-root binding, strict per-RPC payloads, full Git mutation/network operations, write timeout/no-retry result-unknown handling, path/branch/patch validation, untracked symlink rejection, and SSH-pending fail-closed transport selection.
+- Assert protocol minor 8 and `gitDiffOptions`, legacy `exact+3` payload compatibility, pre-serialization capability rejection, all three whitespace flags, 3/10/20 context values, invalid-option rejection, and non-exact partial-revert disablement.
+- Assert protocol minor 10, legacy `fileAttach`, and `fileAttachAny`; safe arbitrary basenames, 20 MiB admission, legacy image limits, XDG cache/session/upload confinement, chunk size and offset validation, size/pixel/SHA-256 verification, atomic commit, abort/drop cleanup, nested 48-hour expiry, Agent 0.1.6 image compatibility, old-Agent arbitrary-file rejection, and local-versus-SSH paste routing.
+- Assert tracked/untracked payload metadata, inclusive 768 KiB and 20000-line boundaries, and stable `git_diff_too_large` parity with Desktop.
 - Assert `validate_relative("", true)` succeeds for the root repository, while `validate_relative("", false)` and empty file paths remain rejected.
 - Assert ordinary untracked directories expand to concrete files and nested repositories are excluded from the parent repository's change list.
 - Assert manifest tampering, duplicate/unknown targets, HTTP opt-in, query/fragment rejection, target selection, size/SHA-256 mismatch, and bounded downloads.
 - Assert install path quoting, strict operation markers/metadata, semantic version actions, lock conflicts, default/custom roots, corrupt/missing discovery recovery, promote rollback, distinct previous versions, and transactional uninstall.
 - Assert Claude/Codex exact-owner merge, duplicate normalization, unknown-event preservation, invalid JSON/TOML refusal, user-owned Codex feature/comment preservation, symlink target change refusal, fingerprint conflict, journal rollback, and Agent uninstall blocking.
+- Assert Desktop Hook report validation accepts current and legacy positive entry counts, rejects zero and counts above 64, rejects `managedEntries > requiredEntries`, and requires installed-record counts to match the report.
 - Assert missing binding no-op, event allowlists, 1 MiB stdin bound, message redaction, Host/client/installation namespace isolation, stale lock recovery, monotonic meta rebuild, TTL/count/byte gap, streaming read/ACK, malformed-record preservation, monotonic batch/ACK validation, full-window event/gap dedup, and Claude/Codex remote notification cwd redaction plus trusted project-name propagation.
 - Run the POSIX installer smoke test for HTTPS dry-run, default HTTP rejection, explicit HTTP, custom install root, downgrade forwarding, and temporary-directory cleanup.
 - Compile the Agent for Linux `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` in addition to host tests.
@@ -347,6 +416,45 @@ transport.build_one_shot_launch(agent_probe_script, SshOneShotOptions::default()
 
 The shared transport owns authentication and routing; the caller owns whether the process is an interactive PTY or a bounded one-shot operation.
 
+### Wrong: require CLI source identity on every non-Git bridge
+
+```rust
+lane != BridgeLane::Git && plan.tool_source.is_empty()
+```
+
+### Correct: require CLI source identity only for the Primary Hook/history lane
+
+```rust
+lane.requires_tool_source() && plan.tool_source.is_empty()
+```
+
+Readonly file/attachment and Git lanes are request-driven Agent capabilities. They retain the full Agent installation and machine identity gate without inventing a CLI source.
+
+### Wrong: select attachment semantics from the filename extension
+
+```rust
+let kind = if file_name.ends_with(".png") {
+    "fileAttachBegin"
+} else {
+    "fileAttachAnyBegin"
+};
+```
+
+### Correct: prefer the arbitrary-file capability and narrowly retain legacy compatibility
+
+```rust
+let response = request("fileAttachAnyBegin").or_else(|error| {
+    if error == "ssh_agent_capability_missing:fileAttachAny" && is_valid_legacy_image(bytes) {
+        request("fileAttachBegin")
+    } else {
+        Err(error)
+    }
+})?;
+```
+
+This prevents a misleading extension from reintroducing a type restriction while keeping Agent
+0.1.6 image paste usable.
+
 ### Wrong: map an absent Agent string field to JSON null
 
 ```rust
@@ -363,6 +471,55 @@ payload["remoteTranscriptRef"] =
 ```
 
 The Desktop option expresses whether a direct locator is available; the Agent wire contract remains a non-null string, with `""` selecting indexed lookup.
+
+### Wrong: duplicate Agent Hook counts in the Desktop
+
+```rust
+let required = if source == "claude" { 11 } else { 6 };
+```
+
+### Correct: validate the Agent-owned count as bounded protocol data
+
+```rust
+let required = report.required_entries;
+if required == 0 || required > MAX_AGENT_HOOK_ENTRIES || report.managed_entries > required {
+    return Err("ssh_agent_hook_count_invalid".to_string());
+}
+```
+
+The Agent owns the Hook template list. The Desktop owns boundary validation and must not duplicate the list length.
+
+### Wrong: add fields to the published legacy Git Diff payload
+
+```ts
+request("gitDiff", { repoPath, relativePath, status, options });
+```
+
+### Correct: keep the legacy payload exact and capability-gate the new request
+
+```ts
+const legacy = isDefaultGitDiffOptions(options);
+request(
+  legacy ? "gitDiff" : "gitDiffWithOptions",
+  legacy ? { repoPath, relativePath, status } : { repoPath, relativePath, status, options },
+);
+```
+
+The daemon rejects `gitDiffWithOptions` before writing a frame when `gitDiffOptions` was not negotiated.
+
+### Wrong: return one Diff path without the final size gate
+
+```rust
+Ok(GitFileDiffPayload { content, can_revert_hunks })
+```
+
+### Correct: converge every Agent Diff path on one payload builder
+
+```rust
+build_diff_payload(content, can_revert_hunks)
+```
+
+This keeps tracked, untracked, legacy, and option-aware requests on the same metadata and `git_diff_too_large` contract.
 
 ### Wrong: treat an SSH Git request as local when the Agent context is not ready
 

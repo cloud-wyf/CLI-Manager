@@ -244,7 +244,7 @@ if (existingProject && matchesProjectSource(existingProject, group.source)) cont
 ### 3. Contracts
 
 - Both the detail action and list context-menu action must enter the same resume flow.
-- The detail action may resume only when the loaded detail identity (source, session id, and file path) matches the currently selected history view.
+- The detail action may resume only when the loaded detail identity matches the currently selected history view. Local/WSL history uses source, session id, and file path; SSH history uses source, session id, and the complete stable `session_ref` tuple (`sourceId`, `sourceInstanceId`, `sourceSessionId`, `transportKind`) because remote summaries and details intentionally expose no local `file_path`.
 - Match maintained projects by history `cwd` first, then by `project_key`, and require the project's CLI type to match the history source.
 - One candidate resumes directly; multiple candidates require explicit selection; cancel creates no terminal.
 - The selected project supplies `cli_args`, provider overrides, environment variables, shell, and Worktree overrides.
@@ -257,7 +257,7 @@ if (existingProject && matchesProjectSource(existingProject, group.source)) cont
 ### 4. Validation & Error Matrix
 
 - Invalid session ID or unsupported source -> localized error, no terminal.
-- Missing or stale detail whose identity differs from the selected view -> keep resume disabled and create no terminal.
+- Missing or stale detail whose identity differs from the selected view -> keep resume disabled and create no terminal. An SSH detail with an empty local file path is valid only when both sides carry the same complete SSH `session_ref`; missing, mixed-transport, or changed remote references remain rejected.
 - Zero compatible project candidates + one exact local/WSL `cwd` project -> resume directly with the bare source command and no project launch configuration.
 - Zero compatible project candidates + zero/multiple exact `cwd` projects -> show all projects plus `Use New Window`; cancel -> no terminal.
 - `Use New Window` + valid history working directory -> create an unscoped terminal in that directory, then run the resume command.
@@ -394,6 +394,68 @@ await get().loadSessions();
 
 ```typescript
 await get().loadSessions({ background: true });
+```
+
+## Scenario: Local Pi History Resume
+
+### 1. Scope / Trigger
+
+- Trigger: changing local history resume commands, CLI source matching, or project selection.
+- Goal: reopen the exact Pi transcript without binding an unrelated project or creating a new session.
+
+### 2. Signatures
+
+```typescript
+buildHistoryResumeCommand(session, project?): string | null;
+stripPiResumeCliArgs(cliArgs): string;
+selectLocalHistoryResumeProject(session, projects, worktree, projectIdFilter): LocalHistoryResumeSelection;
+```
+
+### 3. Contracts
+
+- Local Pi resume uses `pi --session <session-id>`; `--session-id` is forbidden because it may
+  create a new session instead of reopening the selected transcript.
+- Pi project arguments are cleaned by a dedicated helper. Remove `-c`, `-r`, `--continue`,
+  `--resume`, `--session`, `--session-id`, `--fork`, their inline/separate targets, and preserve
+  ordinary arguments such as `--session-dir` and model selection.
+- Do not change shared Claude/Codex/Grok `stripResumeCliArgs` or `appendResumeCliArgs` semantics.
+- Source matching first uses `resolveCliToolHistorySourceId`; provider switching is only the fallback
+  when the registry cannot resolve a source.
+- Local selection order is exact Worktree project, source plus cwd/project-key candidates, current
+  `projectIdFilter` when it belongs to those candidates, unique candidate, then explicit dialog.
+  A current project with the wrong source must never be bound automatically.
+- Pi advertises local resume as supported. SSH Pi resume remains unsupported until the remote
+  identity/preflight protocol explicitly adds Pi.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Invalid/whitespace session ID | Return `null`; do not launch |
+| Pi project contains old resume selectors | Remove selectors and targets before appending ordinary args |
+| Current project is not in the matched candidate set | Do not auto-bind it |
+| Several same-source cwd candidates remain | Open the explicit project dialog |
+
+### 5. Good / Base / Bad Cases
+
+- Good: an exact Worktree project wins even when the main cwd has duplicate Pi projects.
+- Base: one Pi project matches cwd and resumes directly with its normal model/session-dir args.
+- Bad: build `pi --session-id ...`, or use the currently filtered Codex project for a Pi session.
+
+### 6. Tests Required
+
+- Run `node --test scripts/resumeCliArgs.test.mjs scripts/historyResumeProject.test.mjs`.
+- Cover exact `pi --session`, every conflicting argument, preserved normal arguments, duplicate cwd
+  selection, wrong-source rejection, Worktree priority, and Claude/Codex/Grok regressions.
+
+### 7. Wrong vs Correct
+
+```typescript
+// Wrong: --session-id can select/create the wrong Pi session.
+const command = `pi --session-id ${sessionId}`;
+
+// Correct: the dedicated builder strips stale selectors and uses exact resume.
+const command = buildHistoryResumeCommand(session, project);
 ```
 
 ## Scenario: History File Change Records

@@ -534,10 +534,10 @@ export function CommandTemplatePanel({
             <div className="space-y-3 px-3 py-3">
               {[1, 2, 3].map((item) => (
                 <div key={item} className="flex items-center gap-3">
-                  <Skeleton className="h-9 w-9 rounded-lg" />
+                  <Skeleton className="command-template-panel__skeleton h-9 w-9 rounded-lg" />
                   <div className="min-w-0 flex-1 space-y-1.5">
-                    <Skeleton className="h-3 w-2/3" />
-                    <Skeleton className="h-2.5 w-full" />
+                    <Skeleton className="command-template-panel__skeleton h-3 w-2/3" />
+                    <Skeleton className="command-template-panel__skeleton h-2.5 w-full" />
                   </div>
                 </div>
               ))}

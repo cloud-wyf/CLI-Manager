@@ -401,10 +401,15 @@ export interface RemoteHandoffSessionState {
   providerName?: string;
   platform?: "telegram" | "feishu" | "weixin" | "wecom";
   startedAtMs?: number;
+  transport?: "local" | "ssh";
+  sshHostId?: string;
+  remotePath?: string;
 }
 
 export interface TerminalSession {
   id: string;
+  /** 本次 PTY 启动时间，用于将无 Hook 的 SSH Codex 终端安全关联到远端历史。 */
+  createdAtMs?: number;
   projectId?: string;
   worktreeId?: string;
   title: string;

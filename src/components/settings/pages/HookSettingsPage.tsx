@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { ActionIcon, Badge, Box, Button, Card, Divider, Group, SimpleGrid, Stack, Switch, Text, TextInput } from "@mantine/core";
+import { ActionIcon, Badge, Box, Button, Card, Divider, Group, NumberInput, SegmentedControl, SimpleGrid, Stack, Switch, Text, TextInput } from "@mantine/core";
 import { Play, CheckCircle, HelpCircle, ChevronDown, ChevronUp, Folder, FileCode, Copy, Check, X, Activity, Bell, ShieldAlert, ToggleRight, AlertTriangle, BellOff, XCircle, Layers } from "lucide-react";
 import { useSettingsStore, type HookEventType, type HookSettingsSectionKey } from "@/stores/settingsStore";
 import { getErrorMessage, getPiHookErrorMessage } from "@/lib/hookErrors";
@@ -88,6 +88,10 @@ const CCSWITCH_STATE_COLORS: Record<CcSwitchHookProtectionState, string> = {
 
 function pickText(language: AppLanguage, zh: string, en: string) {
   return pickByLanguage(language, zh, en);
+}
+
+function isWindowsPlatform(): boolean {
+  return typeof navigator !== "undefined" && /win/i.test(navigator.platform);
 }
 
 function formatPath(value: string | null, language: AppLanguage): string {
@@ -523,6 +527,9 @@ export function HookSettingsPage() {
   const systemNotificationsEnabled = useSettingsStore((s) => s.systemNotificationsEnabled);
   const suppressSystemNotificationsWhenFocused = useSettingsStore((s) => s.suppressSystemNotificationsWhenFocused);
   const systemNotificationEvents = useSettingsStore((s) => s.systemNotificationEvents);
+  const taskbarAttentionEnabled = useSettingsStore((s) => s.taskbarAttentionEnabled);
+  const taskbarAttentionMode = useSettingsStore((s) => s.taskbarAttentionMode);
+  const taskbarAttentionFlashCount = useSettingsStore((s) => s.taskbarAttentionFlashCount);
   const hookSettingsSectionsExpanded = useSettingsStore((s) => s.hookSettingsSectionsExpanded);
   const ccSwitchDbPath = useSettingsStore((s) => s.ccSwitchDbPath);
   const claudeHookAutoRepairKnownInstalled = useSettingsStore((s) => s.claudeHookAutoRepairKnownInstalled);
@@ -1052,8 +1059,14 @@ export function HookSettingsPage() {
     void updateSetting("systemNotificationEvents", update);
   };
   const notifyState = (events: HookEventType[]) => events.every((e) => systemNotificationEvents[e]);
+  const hookEventNotificationsEnabled = systemNotificationsEnabled || taskbarAttentionEnabled;
   return (
     <Stack gap="lg">
+      <Group justify="flex-end">
+        <Button variant="default" color="gray" size="xs" onClick={() => void refreshStatus()} disabled={anyWorking}>
+          {loading ? t("settings.hooks.status.refreshingAll") : t("settings.hooks.status.refreshAll")}
+        </Button>
+      </Group>
       <CollapsibleHookSection
         title={text("Hook 通知弹框", "Hook Toast Notifications")}
         description={text("控制 Claude Code、Codex CLI 和 Pi Agent Hook 事件的右上角弹框；终端标签小圆点不受这里的弹框开关影响。", "Controls top-right toast cards for Claude Code, Codex CLI, and Pi Agent Hook events. Terminal tab dots are not affected.")}
@@ -1135,7 +1148,7 @@ export function HookSettingsPage() {
                   {text("系统通知", "System Notifications")}
                 </Text>
                 <Text size="xs" c="var(--on-surface-variant)">
-                  {text("每个 Hook 卡片下方可独立开关对应事件的系统通知（灰色铃铛=关闭，蓝色铃铛=开启）", "System notifications can be toggled per Hook card. Gray bell means off, blue bell means on.")}
+                  {t("settings.hooks.eventNotifications.description")}
                 </Text>
               </Box>
             </Group>
@@ -1146,6 +1159,76 @@ export function HookSettingsPage() {
               aria-label={text("启用系统通知", "Enable system notifications")}
             />
           </Group>
+          {isWindowsPlatform() && (
+            <>
+              <Divider />
+              <Group justify="space-between" align="center" gap="md">
+                <Box className="min-w-0">
+                  <Text size="sm" fw={500} c="var(--on-surface)">
+                    {t("settings.hooks.taskbarAttention.title")}
+                  </Text>
+                  <Text mt={4} size="xs" c="var(--text-muted)">
+                    {t("settings.hooks.taskbarAttention.description")}
+                  </Text>
+                </Box>
+                <Switch
+                  color="cliPrimary"
+                  className="shrink-0"
+                  checked={taskbarAttentionEnabled}
+                  onChange={(event) => void updateSetting("taskbarAttentionEnabled", event.currentTarget.checked)}
+                  aria-label={t("settings.hooks.taskbarAttention.title")}
+                />
+              </Group>
+              <Group justify="space-between" align="center" gap="md">
+                <Text size="sm" c="var(--on-surface)">
+                  {t("settings.hooks.taskbarAttention.mode")}
+                </Text>
+                <SegmentedControl
+                  size="xs"
+                  disabled={!taskbarAttentionEnabled}
+                  value={taskbarAttentionMode}
+                  data={[
+                    { value: "finite", label: t("settings.hooks.taskbarAttention.mode.finite") },
+                    { value: "untilFocused", label: t("settings.hooks.taskbarAttention.mode.untilFocused") },
+                  ]}
+                  onChange={(value) => {
+                    if (value === "finite" || value === "untilFocused") {
+                      void updateSetting("taskbarAttentionMode", value);
+                    }
+                  }}
+                />
+              </Group>
+              {taskbarAttentionMode === "finite" && (
+                <Group justify="space-between" align="center" gap="md">
+                  <Box className="min-w-0">
+                    <Text size="sm" c="var(--on-surface)">
+                      {t("settings.hooks.taskbarAttention.flashCount")}
+                    </Text>
+                    <Text mt={4} size="xs" c="var(--text-muted)">
+                      {t("settings.hooks.taskbarAttention.flashCount.description")}
+                    </Text>
+                  </Box>
+                  <NumberInput
+                    w={96}
+                    size="xs"
+                    min={1}
+                    max={20}
+                    step={1}
+                    allowDecimal={false}
+                    clampBehavior="strict"
+                    disabled={!taskbarAttentionEnabled}
+                    value={taskbarAttentionFlashCount}
+                    onChange={(value) => {
+                      if (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 20) {
+                        void updateSetting("taskbarAttentionFlashCount", value);
+                      }
+                    }}
+                    aria-label={t("settings.hooks.taskbarAttention.flashCount")}
+                  />
+                </Group>
+              )}
+            </>
+          )}
           <Group justify="space-between" align="center" gap="md">
             <Box className="min-w-0">
               <Text size="sm" fw={500} c="var(--on-surface)">
@@ -1182,7 +1265,7 @@ export function HookSettingsPage() {
             aria-label={t("settings.hooks.bridge.enabled")}
           />
         )}
-        right={claudeHookBridgeEnabled ? <StatusPill status={claudeStatus} /> : undefined}
+        right={<StatusPill status={claudeStatus} />}
       >
         <Stack gap="lg">
           {claudeHookBridgeEnabled && (
@@ -1194,7 +1277,7 @@ export function HookSettingsPage() {
               checked={claudeSessionStartInstalled}
               notifyEnabled={notifyState(["SessionStart"])}
               onToggleNotify={() => toggleNotifyEvents(["SessionStart"], !notifyState(["SessionStart"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+                  notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("claude", "sessionStart", claudeSessionStartInstalled, claudeSessionStartLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || claudeStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(claudeToolLabel, claudeSessionStartLabel, claudeSessionStartInstalled)}
@@ -1205,7 +1288,7 @@ export function HookSettingsPage() {
               checked={claudeRunningInstalled}
               notifyEnabled={notifyState(["UserPromptSubmit"])}
               onToggleNotify={() => toggleNotifyEvents(["UserPromptSubmit"], !notifyState(["UserPromptSubmit"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+                  notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("claude", "running", claudeRunningInstalled, claudeRunningLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || claudeStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(claudeToolLabel, claudeRunningLabel, claudeRunningInstalled)}
@@ -1216,7 +1299,7 @@ export function HookSettingsPage() {
               checked={claudeAttentionInstalled}
               notifyEnabled={notifyState(["Notification"])}
               onToggleNotify={() => toggleNotifyEvents(["Notification"], !notifyState(["Notification"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+                  notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("claude", "attention", claudeAttentionInstalled, claudeAttentionLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || claudeStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(claudeToolLabel, claudeAttentionLabel, claudeAttentionInstalled)}
@@ -1227,7 +1310,7 @@ export function HookSettingsPage() {
               checked={claudeStopInstalled}
               notifyEnabled={notifyState(["Stop"])}
               onToggleNotify={() => toggleNotifyEvents(["Stop"], !notifyState(["Stop"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+                  notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("claude", "stop", claudeStopInstalled, claudeStopLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || claudeStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(claudeToolLabel, claudeStopLabel, claudeStopInstalled)}
@@ -1238,7 +1321,7 @@ export function HookSettingsPage() {
               checked={claudeFailureInstalled}
               notifyEnabled={notifyState(["StopFailure"])}
               onToggleNotify={() => toggleNotifyEvents(["StopFailure"], !notifyState(["StopFailure"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+                  notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("claude", "failure", claudeFailureInstalled, claudeFailureLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || claudeStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(claudeToolLabel, claudeFailureLabel, claudeFailureInstalled)}
@@ -1381,7 +1464,7 @@ export function HookSettingsPage() {
             aria-label={t("settings.hooks.bridge.enabled")}
           />
         )}
-        right={codexHookBridgeEnabled ? <StatusPill status={codexStatus} /> : undefined}
+        right={<StatusPill status={codexStatus} />}
       >
         <Stack gap="lg">
           {codexHookBridgeEnabled && (
@@ -1393,7 +1476,7 @@ export function HookSettingsPage() {
               checked={codexSessionStartInstalled}
               notifyEnabled={notifyState(["SessionStart"])}
               onToggleNotify={() => toggleNotifyEvents(["SessionStart"], !notifyState(["SessionStart"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("codex", "sessionStart", codexSessionStartInstalled, codexSessionStartLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || codexStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(codexToolLabel, codexSessionStartLabel, codexSessionStartInstalled)}
@@ -1404,7 +1487,7 @@ export function HookSettingsPage() {
               checked={codexRunningInstalled}
               notifyEnabled={notifyState(["UserPromptSubmit"])}
               onToggleNotify={() => toggleNotifyEvents(["UserPromptSubmit"], !notifyState(["UserPromptSubmit"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("codex", "running", codexRunningInstalled, codexRunningLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || codexStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(codexToolLabel, codexRunningLabel, codexRunningInstalled)}
@@ -1415,7 +1498,7 @@ export function HookSettingsPage() {
               checked={codexAttentionInstalled}
               notifyEnabled={notifyState(["PermissionRequest"])}
               onToggleNotify={() => toggleNotifyEvents(["PermissionRequest"], !notifyState(["PermissionRequest"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("codex", "attention", codexAttentionInstalled, codexAttentionLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || codexStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(codexToolLabel, codexAttentionLabel, codexAttentionInstalled)}
@@ -1426,7 +1509,7 @@ export function HookSettingsPage() {
               checked={codexStopInstalled}
               notifyEnabled={notifyState(["Stop"])}
               onToggleNotify={() => toggleNotifyEvents(["Stop"], !notifyState(["Stop"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("codex", "stop", codexStopInstalled, codexStopLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || codexStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(codexToolLabel, codexStopLabel, codexStopInstalled)}
@@ -1584,7 +1667,7 @@ export function HookSettingsPage() {
             aria-label={t("settings.hooks.bridge.enabled")}
           />
         )}
-        right={piHookBridgeEnabled ? <StatusPill status={piStatus} /> : undefined}
+        right={<StatusPill status={piStatus} />}
       >
         <Stack gap="lg">
           {piHookBridgeEnabled && (
@@ -1596,7 +1679,7 @@ export function HookSettingsPage() {
               checked={piSessionStartInstalled}
               notifyEnabled={notifyState(["SessionStart"])}
               onToggleNotify={() => toggleNotifyEvents(["SessionStart"], !notifyState(["SessionStart"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("pi", "sessionStart", piSessionStartInstalled, piSessionStartLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || piStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(piToolLabel, piSessionStartLabel, piSessionStartInstalled)}
@@ -1607,7 +1690,7 @@ export function HookSettingsPage() {
               checked={piRunningInstalled}
               notifyEnabled={notifyState(["UserPromptSubmit"])}
               onToggleNotify={() => toggleNotifyEvents(["UserPromptSubmit"], !notifyState(["UserPromptSubmit"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("pi", "running", piRunningInstalled, piRunningLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || piStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(piToolLabel, piRunningLabel, piRunningInstalled)}
@@ -1618,7 +1701,7 @@ export function HookSettingsPage() {
               checked={piStopInstalled}
               notifyEnabled={notifyState(["Stop"])}
               onToggleNotify={() => toggleNotifyEvents(["Stop"], !notifyState(["Stop"]))}
-              notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
               onClick={() => void handleModuleToggle("pi", "stop", piStopInstalled, piStopLabel)}
               disabled={loading || claudeWorking || codexWorking || piWorking || piStatus === "directoryMissing"}
               actionLabel={buildModuleActionLabel(piToolLabel, piStopLabel, piStopInstalled)}
@@ -1759,7 +1842,7 @@ export function HookSettingsPage() {
             aria-label={t("settings.hooks.bridge.enabled")}
           />
         )}
-        right={grokHookBridgeEnabled ? <StatusPill status={grokStatus} /> : undefined}
+        right={<StatusPill status={grokStatus} />}
       >
         <Stack gap="lg">
           {grokHookBridgeEnabled && (
@@ -1771,7 +1854,7 @@ export function HookSettingsPage() {
                   checked={grokSessionStartInstalled}
                   notifyEnabled={notifyState(["SessionStart"])}
                   onToggleNotify={() => toggleNotifyEvents(["SessionStart"], !notifyState(["SessionStart"]))}
-                  notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
                   onClick={() => void handleModuleToggle("grok", "sessionStart", grokSessionStartInstalled, grokSessionStartLabel)}
                   disabled={anyWorking || grokStatus === "directoryMissing"}
                   actionLabel={buildModuleActionLabel(grokToolLabel, grokSessionStartLabel, grokSessionStartInstalled)}
@@ -1782,7 +1865,7 @@ export function HookSettingsPage() {
                   checked={grokRunningInstalled}
                   notifyEnabled={notifyState(["UserPromptSubmit"])}
                   onToggleNotify={() => toggleNotifyEvents(["UserPromptSubmit"], !notifyState(["UserPromptSubmit"]))}
-                  notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
                   onClick={() => void handleModuleToggle("grok", "running", grokRunningInstalled, grokRunningLabel)}
                   disabled={anyWorking || grokStatus === "directoryMissing"}
                   actionLabel={buildModuleActionLabel(grokToolLabel, grokRunningLabel, grokRunningInstalled)}
@@ -1793,7 +1876,7 @@ export function HookSettingsPage() {
                   checked={grokAttentionInstalled}
                   notifyEnabled={notifyState(["Notification"])}
                   onToggleNotify={() => toggleNotifyEvents(["Notification"], !notifyState(["Notification"]))}
-                  notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
                   onClick={() => void handleModuleToggle("grok", "attention", grokAttentionInstalled, grokAttentionLabel)}
                   disabled={anyWorking || grokStatus === "directoryMissing"}
                   actionLabel={buildModuleActionLabel(grokToolLabel, grokAttentionLabel, grokAttentionInstalled)}
@@ -1804,7 +1887,7 @@ export function HookSettingsPage() {
                   checked={grokStopInstalled}
                   notifyEnabled={notifyState(["Stop"])}
                   onToggleNotify={() => toggleNotifyEvents(["Stop"], !notifyState(["Stop"]))}
-                  notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
                   onClick={() => void handleModuleToggle("grok", "stop", grokStopInstalled, grokStopLabel)}
                   disabled={anyWorking || grokStatus === "directoryMissing"}
                   actionLabel={buildModuleActionLabel(grokToolLabel, grokStopLabel, grokStopInstalled)}
@@ -1815,7 +1898,7 @@ export function HookSettingsPage() {
                   checked={grokFailureInstalled}
                   notifyEnabled={notifyState(["StopFailure"])}
                   onToggleNotify={() => toggleNotifyEvents(["StopFailure"], !notifyState(["StopFailure"]))}
-                  notifyDisabled={!systemNotificationsEnabled}
+              notifyDisabled={!hookEventNotificationsEnabled}
                   onClick={() => void handleModuleToggle("grok", "failure", grokFailureInstalled, grokFailureLabel)}
                   disabled={anyWorking || grokStatus === "directoryMissing"}
                   actionLabel={buildModuleActionLabel(grokToolLabel, grokFailureLabel, grokFailureInstalled)}

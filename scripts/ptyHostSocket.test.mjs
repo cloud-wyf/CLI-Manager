@@ -26,6 +26,18 @@ export async function invoke() {
 writeFileSync(join(tempDir, "tauriEvent.mjs"), `
 export async function listen() { return () => {}; }
 `);
+writeFileSync(join(tempDir, "logger.mjs"), `
+export const infoLogs = [];
+export const warnLogs = [];
+export function logInfo(message, data) { infoLogs.push({ message, data }); }
+export function logWarn(message, data) { warnLogs.push({ message, data }); }
+`);
+writeFileSync(join(tempDir, "resourceDiagnosticsLog.mjs"), `
+export const entries = [];
+export function writeResourceDiagnostic(level, source, event, payload) {
+  entries.push({ level, source, event, payload });
+}
+`);
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -95,7 +107,7 @@ class FakeWebSocket {
   close() {
     if (this.readyState === FakeWebSocket.CLOSED) return;
     this.readyState = FakeWebSocket.CLOSED;
-    queueMicrotask(() => this.onclose?.());
+    queueMicrotask(() => this.onclose?.({ code: 1000, reason: "", wasClean: true }));
   }
 }
 
@@ -114,10 +126,13 @@ const transpiled = ts.transpileModule(source, {
   fileName: "PtyHostSocket.ts",
 }).outputText
   .replace('from "@tauri-apps/api/core"', 'from "./tauriCore.mjs"')
-  .replace('from "@tauri-apps/api/event"', 'from "./tauriEvent.mjs"');
+  .replace('from "@tauri-apps/api/event"', 'from "./tauriEvent.mjs"')
+  .replace('from "../../lib/logger"', 'from "./logger.mjs"')
+  .replace('from "../../lib/resourceDiagnosticsLog"', 'from "./resourceDiagnosticsLog.mjs"');
 const socketPath = join(tempDir, "PtyHostSocket.mjs");
 writeFileSync(socketPath, transpiled, "utf8");
 const { PtyHostSocket } = await import(pathToFileURL(socketPath).href);
+const resourceLogStub = await import(pathToFileURL(join(tempDir, "resourceDiagnosticsLog.mjs")).href);
 
 test("authentication has a bounded timeout", { concurrency: false }, async () => {
   FakeWebSocket.mode = "auth-timeout";
@@ -131,8 +146,18 @@ test("failed close tombstones the session and prevents reconnect attach", { conc
   const socket = new PtyHostSocket();
   const attached = await socket.attach("session-1");
   assert.equal(attached.attached, true);
+  socket.queueReplay("session-1", [{
+    kind: "replay",
+    sessionId: "session-1",
+    sequence: 1,
+    cols: 80,
+    rows: 24,
+    data: new TextEncoder().encode("pending"),
+  }]);
+  assert.equal(socket.diagnosticsSnapshot().pendingOutputFrames, 1);
   FakeWebSocket.mode = "close-timeout";
   await assert.rejects(socket.close("session-1"), /request timed out: close/);
+  assert.equal(socket.diagnosticsSnapshot().pendingOutputFrames, 0);
   FakeWebSocket.mode = "normal";
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(FakeWebSocket.attachRequests, 1);
@@ -209,6 +234,75 @@ test("queued replay marks exactly one batch boundary", { concurrency: false }, (
     { kind: "replay", sessionId: "session-replay", sequence: 2, cols: 120, rows: 30, data: new Uint8Array() },
   ]);
   assert.deepEqual(received.map((frame) => frame.replayBatchEnd), [false, true]);
+});
+
+test("diagnostics account for pending output until a listener consumes it", { concurrency: false }, () => {
+  const socket = new PtyHostSocket();
+  socket.queueReplay("session-diagnostics", [
+    {
+      kind: "replay",
+      sessionId: "session-diagnostics",
+      sequence: 1,
+      cols: 80,
+      rows: 24,
+      data: new TextEncoder().encode("queued-output"),
+    },
+  ]);
+
+  const queued = socket.diagnosticsSnapshot();
+  assert.equal(queued.pendingOutputSessions, 1);
+  assert.equal(queued.pendingOutputFrames, 1);
+  assert.equal(queued.pendingOutputBytes, "queued-output".length);
+  assert.deepEqual(queued.topPendingOutput, [{
+    sessionId: "session-diagnostics",
+    queuedFrames: 1,
+    queuedBytes: "queued-output".length,
+  }]);
+
+  socket.subscribeOutput("session-diagnostics", () => {});
+  const consumed = socket.diagnosticsSnapshot();
+  assert.equal(consumed.pendingOutputSessions, 0);
+  assert.equal(consumed.pendingOutputFrames, 0);
+  assert.equal(consumed.pendingOutputBytes, 0);
+});
+
+test("pending output warning is deduplicated and resets after clearing", { concurrency: false }, () => {
+  resourceLogStub.entries.length = 0;
+  const socket = new PtyHostSocket();
+  const thresholdPayload = new Uint8Array(4 * 1024 * 1024);
+
+  socket.queueReplay("session-warning", [{
+    kind: "replay",
+    sessionId: "session-warning",
+    sequence: 1,
+    cols: 80,
+    rows: 24,
+    data: thresholdPayload,
+  }]);
+  socket.queueReplay("session-warning", [{
+    kind: "replay",
+    sessionId: "session-warning",
+    sequence: 2,
+    cols: 80,
+    rows: 24,
+    data: new Uint8Array([1]),
+  }]);
+  assert.equal(resourceLogStub.entries.filter((entry) => entry.level === "warn").length, 1);
+
+  const unsubscribe = socket.subscribeOutput("session-warning", () => {});
+  unsubscribe();
+  assert.equal(resourceLogStub.entries.filter((entry) => entry.level === "info").length, 1);
+  assert.equal(resourceLogStub.entries[1].event, "backlogCleared");
+
+  socket.queueReplay("session-warning", [{
+    kind: "replay",
+    sessionId: "session-warning",
+    sequence: 3,
+    cols: 80,
+    rows: 24,
+    data: thresholdPayload,
+  }]);
+  assert.equal(resourceLogStub.entries.filter((entry) => entry.level === "warn").length, 2);
 });
 
 test("closing the last session cancels a pending reconnect", { concurrency: false }, async () => {

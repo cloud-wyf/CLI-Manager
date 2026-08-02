@@ -301,10 +301,11 @@ impl PtyManager {
     /// 既进 Linux shell，又能在 claude 经 interop 调 Windows 端 cli-manager.exe 时回传。
     /// 合并已有 WSLENV（注入批次或进程环境），不覆盖用户原有项。
     fn apply_wsl_env_forwarding(env_vars: &mut HashMap<String, String>) {
-        const FORWARD: [&str; 3] = [
+        const FORWARD: [&str; 4] = [
             "CLI_MANAGER_TAB_ID",
             "CLI_MANAGER_NOTIFY_PORT",
             "CLI_MANAGER_NOTIFY_TOKEN",
+            "COLORTERM",
         ];
         let present: Vec<&str> = FORWARD
             .iter()
@@ -339,6 +340,17 @@ impl PtyManager {
         }
 
         env_vars.insert("WSLENV".to_string(), entries.join(":"));
+    }
+
+    fn apply_terminal_capabilities(env_vars: &mut HashMap<String, String>, is_windows: bool) {
+        env_vars
+            .entry("COLORTERM".to_string())
+            .or_insert_with(|| "truecolor".to_string());
+        if !is_windows {
+            env_vars
+                .entry("TERM".to_string())
+                .or_insert_with(|| "xterm-256color".to_string());
+        }
     }
 
     fn powershell_runtime_monitor_args() -> Vec<String> {
@@ -583,6 +595,10 @@ PS0='\e]133;C\a${PS0:0:$((__cli_manager_ran=1,0))}'
         let default_shell_key = Self::default_shell_key();
         let shell_key = shell.unwrap_or(default_shell_key);
         let mut env_vars = env_vars;
+        Self::apply_terminal_capabilities(
+            env_vars.get_or_insert_with(HashMap::new),
+            cfg!(target_os = "windows"),
+        );
         if cfg!(target_os = "windows")
             && shell_key == "cmd"
             && Self::shell_runtime_monitoring_enabled(env_vars.as_ref())
@@ -646,19 +662,6 @@ PS0='\e]133;C\a${PS0:0:$((__cli_manager_ran=1,0))}'
         );
         let mut launch_env = ssh_env;
         launch_env.extend(env_vars.unwrap_or_default());
-        // 非 Windows：GUI 启动（Dock/Finder）时父进程没有 TERM，子进程继承空 TERM
-        // 会导致 claude/codex/ls/git 等判定为非彩色终端而禁用 ANSI 颜色。
-        // 显式注入 xterm-256color（xterm.js 完整支持）+ truecolor，让支持的工具走 24-bit。
-        // 仅在调用方未自定义时补默认值，尊重用户偏好。
-        if !cfg!(target_os = "windows") {
-            launch_env
-                .entry("TERM".to_string())
-                .or_insert_with(|| "xterm-256color".to_string());
-            launch_env
-                .entry("COLORTERM".to_string())
-                .or_insert_with(|| "truecolor".to_string());
-        }
-
         let spawned = platform::spawn(PtyLaunchOptions {
             exe: exe.clone(),
             args: args.clone(),
@@ -1390,6 +1393,53 @@ mod tests {
         vars.insert("WSLENV".to_string(), "CLI_MANAGER_TAB_ID".to_string());
         PtyManager::apply_wsl_env_forwarding(&mut vars);
         assert_eq!(vars.get("WSLENV").unwrap(), "CLI_MANAGER_TAB_ID");
+    }
+
+    #[test]
+    fn terminal_capabilities_on_windows_add_only_colorterm() {
+        let mut vars = HashMap::new();
+        PtyManager::apply_terminal_capabilities(&mut vars, true);
+
+        assert_eq!(vars.get("COLORTERM").map(String::as_str), Some("truecolor"));
+        assert!(!vars.contains_key("TERM"));
+    }
+
+    #[test]
+    fn terminal_capabilities_off_windows_add_term_and_colorterm() {
+        let mut vars = HashMap::new();
+        PtyManager::apply_terminal_capabilities(&mut vars, false);
+
+        assert_eq!(vars.get("COLORTERM").map(String::as_str), Some("truecolor"));
+        assert_eq!(vars.get("TERM").map(String::as_str), Some("xterm-256color"));
+    }
+
+    #[test]
+    fn terminal_capabilities_preserve_explicit_values() {
+        let mut vars = HashMap::from([
+            ("COLORTERM".to_string(), "24bit".to_string()),
+            ("TERM".to_string(), "screen-256color".to_string()),
+        ]);
+        PtyManager::apply_terminal_capabilities(&mut vars, false);
+
+        assert_eq!(vars.get("COLORTERM").map(String::as_str), Some("24bit"));
+        assert_eq!(
+            vars.get("TERM").map(String::as_str),
+            Some("screen-256color")
+        );
+    }
+
+    #[test]
+    fn wsl_env_forwarding_adds_colorterm_once() {
+        let mut vars = HashMap::from([
+            ("COLORTERM".to_string(), "truecolor".to_string()),
+            ("WSLENV".to_string(), "FOO/u:COLORTERM/u".to_string()),
+        ]);
+        PtyManager::apply_wsl_env_forwarding(&mut vars);
+
+        assert_eq!(
+            vars.get("WSLENV").map(String::as_str),
+            Some("FOO/u:COLORTERM/u")
+        );
     }
 
     #[test]

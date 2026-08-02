@@ -2130,6 +2130,19 @@ export function Sidebar({
                   <Play size={14} strokeWidth={1.5} />
                   {compactMode ? t("sidebar.menu.openExternalTerminal") : t("sidebar.menu.openTerminal")}
                 </button>
+                {!compactMode && !useExternalTerminal && !showProjectBatchContextMenu && (
+                  <button
+                    className="context-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      void openProjectExternally([contextMenu.project]);
+                      setContextMenu(null);
+                    }}
+                  >
+                    <TerminalSquare size={14} strokeWidth={1.5} />
+                    {t("sidebar.menu.openExternalTerminal")}
+                  </button>
+                )}
                 <button
                   className="context-menu-item"
                   hidden={showProjectBatchContextMenu}

@@ -7,9 +7,9 @@
 ## Current Status
 
 <!-- @@@auto:current-status -->
-- **Active File**: `journal-1.md`
-- **Total Sessions**: 49
-- **Last Active**: 2026-07-27
+- **Active File**: `journal-2.md`
+- **Total Sessions**: 73
+- **Last Active**: 2026-07-31
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,8 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1717 | Active |
+| `journal-2.md` | ~503 | Active |
+| `journal-1.md` | ~2014 | Archived |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +30,30 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 73 | 2026-07-31 | 修复终端光标原生显隐 | `5f562763` | `master` |
+| 72 | 2026-07-31 | 增加资源持续上涨诊断日志 | `ce3c9360` | `master` |
+| 71 | 2026-07-31 | 容忍 Hook 配置目录失效 | `0321d7a8` | `master` |
+| 70 | 2026-07-31 | 项目右键菜单增加外部终端入口 | `8e0eefc0` | `master` |
+| 69 | 2026-07-31 | SSH 任意文件粘贴 | `9cfdd10b` | `feat/ssh-agent` |
+| 68 | 2026-07-30 | 统一终端粘贴图片存储目录 | `7b977c45` | `master` |
+| 67 | 2026-07-30 | 兼容 Grok TUI 鼠标交互 | `151a7118` | `master` |
+| 66 | 2026-07-30 | 简化终端状态标记设置 | `c525a6c8` | `feat/terminal-status-marker-settings` |
+| 65 | 2026-07-30 | 单 Pane 布局隐藏状态标记 | `396d1c38` | `master` |
+| 64 | 2026-07-30 | 纠正 Pane 默认焦点边框颜色 | `bdf0ec49` | `master` |
+| 63 | 2026-07-30 | 调整 Pane 完成状态默认颜色 | `eca51e4c` | `master` |
+| 62 | 2026-07-30 | 终端 Pane 状态标记与内容区边界修复 | `04055b45`, `fe9e214c` | `master` |
+| 61 | 2026-07-30 | Hook 任务栏提醒与安装状态检测修复 | `51566bdb` | `master` |
+| 60 | 2026-07-30 | 修复 Pi 输入法编辑器锚点 | `c6eed21e` | `master` |
+| 59 | 2026-07-30 | 修复 Pi 终端兼容与本地历史恢复 | `68c2a0d1` | `master` |
+| 58 | 2026-07-29 | 修复 Pi 终端消息不可见 | `6cbfcb77` | `master` |
+| 57 | 2026-07-29 | 动态注入 R2 发布域名 | `f4f3e301` | `master` |
+| 56 | 2026-07-29 | 修复 Codex 换行与会话精确恢复 | `342d526d` | `master` |
+| 55 | 2026-07-29 | 修复折叠侧边栏项目悬浮提示 | `926e2135` | `master` |
+| 54 | 2026-07-28 | 解决 PR173 冲突并收紧 SSH 托管资格 | `17309f78` | `pr-173-fix` |
+| 53 | 2026-07-28 | 修复同目录 Tab 切换时文件树刷新 | `1dd1822c` | `feat/git-power` |
+| 52 | 2026-07-28 | 升级桌面应用版本至 V1.3.2 | `c3e6a7ae` | `feat/git-power` |
+| 51 | 2026-07-28 | 完成 Git Diff 审阅升级父任务验收 | `a68e6ee9` | `feat/git-power` |
+| 50 | 2026-07-28 | 修复 Git Diff 主题与同步横向滚动 | `354dbafc` | `feat/git-power` |
 | 49 | 2026-07-27 | 修复历史会话转换、删除与列表刷新 | `3556a869` | `master` |
 | 48 | 2026-07-27 | 修复历史转换与继续对话 | `5a4232e9` | `master` |
 | 47 | 2026-07-27 | 设置页侧边导航小屏滚动 | `4dfd429b` | `master` |

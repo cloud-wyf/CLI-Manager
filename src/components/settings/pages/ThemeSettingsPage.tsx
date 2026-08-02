@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   ActionIcon,
   Badge,
@@ -20,7 +20,7 @@ import {
 } from "@mantine/core";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, CircleHelp, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Plus, RefreshCw, Trash2 } from "lucide-react";
 import {
   TERMINAL_THEME_GROUPS,
   TERMINAL_THEME_PRESETS,
@@ -61,10 +61,22 @@ import {
 } from "../../../lib/systemFonts";
 import { FontFamilySelect } from "../FontFamilySelect";
 import { pickByLanguage, useI18n } from "../../../lib/i18n";
+import {
+  type TerminalPaneMarkerSettings,
+  type TerminalPaneMarkerStyle,
+} from "../../../lib/terminalPaneMarker";
 
 const SWATCH_KEYS = ["background", "foreground", "red", "green", "blue", "cyan"] as const;
 const TERMINAL_FONT_FALLBACK = "monospace";
+const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 type TerminalThemeLibraryMode = "light" | "dark" | "system";
+type PaneMarkerPreviewColorKey = "doneColor" | "failedColor" | "attentionColor";
+
+const PANE_MARKER_PREVIEW_COLOR_OPTIONS = [
+  ["doneColor", "settings.terminal.paneMarker.color.done"],
+  ["failedColor", "settings.terminal.paneMarker.color.failed"],
+  ["attentionColor", "settings.terminal.paneMarker.color.attention"],
+] as const satisfies ReadonlyArray<readonly [PaneMarkerPreviewColorKey, string]>;
 
 const FONT_FAMILY_OPTIONS: { value: string; label: string; labelEn?: string }[] = [
   { value: "Cascadia Code, Consolas, monospace", label: "Cascadia Code（推荐）", labelEn: "Cascadia Code (Recommended)" },
@@ -74,6 +86,129 @@ const FONT_FAMILY_OPTIONS: { value: string; label: string; labelEn?: string }[] 
   { value: "Consolas, monospace", label: "Consolas" },
   { value: "\"Courier New\", monospace", label: "Courier New" },
 ];
+
+interface TerminalColorSettingProps {
+  value: string;
+  fallbackColor: string;
+  label: string;
+  pickerAriaLabel: string;
+  hexAriaLabel: string;
+  description?: string;
+  invalidDescription: string;
+  restoreLabel: string;
+  onCommit: (value: string) => void;
+}
+
+function TerminalColorSetting({
+  value,
+  fallbackColor,
+  label,
+  pickerAriaLabel,
+  hexAriaLabel,
+  description,
+  invalidDescription,
+  restoreLabel,
+  onCommit,
+}: TerminalColorSettingProps) {
+  const [draft, setDraft] = useState(value);
+  const commitTimerRef = useRef<number | null>(null);
+
+  const clearCommitTimer = () => {
+    if (commitTimerRef.current === null) return;
+    window.clearTimeout(commitTimerRef.current);
+    commitTimerRef.current = null;
+  };
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  useEffect(() => clearCommitTimer, []);
+
+  const normalizedDraft = draft.trim();
+  const invalid = normalizedDraft !== "" && !HEX_COLOR_PATTERN.test(normalizedDraft);
+  const pickerValue = HEX_COLOR_PATTERN.test(normalizedDraft) ? normalizedDraft : fallbackColor;
+
+  const commit = (candidate = draft) => {
+    clearCommitTimer();
+    const next = candidate.trim();
+    if (next !== "" && !HEX_COLOR_PATTERN.test(next)) return;
+    if (next !== value) onCommit(next);
+  };
+
+  const scheduleCommit = (candidate: string) => {
+    clearCommitTimer();
+    const next = candidate.trim();
+    if (next !== "" && !HEX_COLOR_PATTERN.test(next)) return;
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      if (next !== value) onCommit(next);
+    }, 180);
+  };
+
+  return (
+    <Box className="border-b border-border px-3 py-3 last:border-b-0">
+      <Box className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <Box className="min-w-0 flex-1">
+          <Text size="xs" fw={600} c="var(--on-surface)">
+            {label}
+          </Text>
+          {(invalid || description) && (
+            <Text mt={4} size="xs" lh={1.45} c={invalid ? "var(--danger)" : "var(--text-muted)"}>
+              {invalid ? invalidDescription : description}
+            </Text>
+          )}
+        </Box>
+        <Box className="grid w-full max-w-[324px] shrink-0 grid-cols-[44px_116px_minmax(0,1fr)] items-center gap-2 sm:w-[324px]">
+          <TextInput
+            type="color"
+            value={pickerValue}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              setDraft(next);
+              scheduleCommit(next);
+            }}
+            onBlur={() => commit()}
+            w={44}
+            size="xs"
+            aria-label={pickerAriaLabel}
+            styles={{ input: { cursor: "pointer", height: 30, padding: 3 } }}
+          />
+          <TextInput
+            value={draft}
+            onChange={(event) => setDraft(event.currentTarget.value.trim())}
+            onBlur={() => commit()}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commit();
+            }}
+            placeholder={fallbackColor}
+            size="xs"
+            w={116}
+            aria-label={hexAriaLabel}
+            aria-invalid={invalid}
+            styles={{ input: { fontFamily: "var(--font-ui-mono)", fontSize: 12 } }}
+          />
+          {value && (
+            <Button
+              type="button"
+              size="xs"
+              variant="subtle"
+              color="cliPrimary"
+              onClick={() => {
+                clearCommitTimer();
+                setDraft("");
+                onCommit("");
+              }}
+              className="min-w-0 justify-self-start whitespace-nowrap"
+            >
+              {restoreLabel}
+            </Button>
+          )}
+        </Box>
+      </Box>
+    </Box>
+  );
+}
 
 const UNSPLIT_OPTIONS: { value: UnsplitBehavior; label: string; labelEn: string }[] = [
   { value: "merge", label: "合并到相邻 Pane", labelEn: "Merge into adjacent Pane" },
@@ -186,6 +321,109 @@ function CollapsibleSettingsSection({
   );
 }
 
+function PaneMarkerStylePreview({
+  style,
+  label,
+  markerColor,
+  selected,
+  onSelect,
+}: {
+  style: TerminalPaneMarkerStyle;
+  label: string;
+  markerColor: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const previewBorder = "color-mix(in srgb, var(--terminal-theme-muted, #64748b) 34%, transparent)";
+  const previewChrome =
+    "color-mix(in srgb, var(--terminal-theme-background, #0c0e10) 84%, var(--terminal-theme-foreground, #f8fafc) 16%)";
+  const markerStyle = {
+    "--terminal-pane-marker-color": markerColor,
+    "--terminal-pane-marker-width": "2px",
+    "--terminal-pane-marker-opacity": 1,
+    "--terminal-pane-marker-side-height": "8px",
+  } as CSSProperties;
+
+  return (
+    <UnstyledButton
+      type="button"
+      className="ui-focus-ring ui-selection-card cursor-pointer rounded-xl border p-3 transition-colors"
+      style={{
+        borderColor: "var(--border)",
+        background: selected
+          ? "color-mix(in srgb, var(--primary) 8%, var(--surface-container-low))"
+          : "transparent",
+      }}
+      onClick={onSelect}
+      aria-pressed={selected}
+      aria-label={label}
+    >
+      <Box
+        aria-hidden="true"
+        className="grid h-24 grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] overflow-hidden rounded-lg border font-mono text-[9px] leading-[1.45]"
+        style={{
+          borderColor: previewBorder,
+          backgroundColor: "var(--terminal-theme-background, #0c0e10)",
+          color: "var(--terminal-theme-foreground, #f8fafc)",
+        }}
+      >
+        <div className="flex min-w-0 flex-col border-r" style={{ borderColor: previewBorder }}>
+          <div
+            className="flex h-6 shrink-0 items-center gap-1.5 border-b px-2"
+            style={{ borderColor: previewBorder, background: previewChrome }}
+          >
+            <span
+              className="h-1.5 w-1.5 shrink-0 rounded-full"
+              style={{ backgroundColor: "var(--terminal-theme-muted, #64748b)" }}
+            />
+            <span className="truncate opacity-75">PowerShell</span>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden px-2 py-1.5">
+            <div>PS&gt; npm run dev</div>
+            <div className="mt-1" style={{ color: "var(--terminal-theme-accent, #60a5fa)" }}>VITE v7.0.0</div>
+            <div className="truncate opacity-55">localhost:5173</div>
+          </div>
+        </div>
+
+        <div className="flex min-w-0 flex-col">
+          <div
+            className="flex h-6 shrink-0 items-center gap-1.5 border-b px-2"
+            style={{ borderColor: previewBorder, background: previewChrome }}
+          >
+            <span
+              className="h-1.5 w-1.5 shrink-0 rounded-full"
+              style={{ backgroundColor: "var(--terminal-theme-accent, #60a5fa)" }}
+            />
+            <span className="truncate">Codex</span>
+          </div>
+          <div className="relative min-h-0 flex-1 overflow-hidden px-2 py-1.5">
+            <div>&gt; git diff --stat</div>
+            <div className="mt-1 truncate opacity-65">src/App.tsx</div>
+            <div style={{ color: "var(--terminal-theme-accent, #60a5fa)" }}>3 files +24 -7</div>
+            <div
+              className="ui-terminal-pane-marker"
+              data-marker-style={style}
+              data-marker-status="focus"
+              style={markerStyle}
+            >
+              <span className="ui-terminal-pane-marker__top" />
+              <span className="ui-terminal-pane-marker__right" />
+              <span className="ui-terminal-pane-marker__bottom" />
+              <span className="ui-terminal-pane-marker__left" />
+            </div>
+          </div>
+        </div>
+      </Box>
+      <Group mt={8} justify="center" gap={5} wrap="nowrap">
+        {selected && <Check size={13} strokeWidth={2.5} aria-hidden="true" />}
+        <Text size="xs" ta="center" fw={selected ? 600 : 400} c={selected ? "var(--primary)" : undefined}>
+          {label}
+        </Text>
+      </Group>
+    </UnstyledButton>
+  );
+}
+
 export function ThemeSettingsPage() {
   const { language, t } = useI18n();
   const text = (zh: string, en: string) => pickByLanguage(language, zh, en);
@@ -198,6 +436,9 @@ export function ThemeSettingsPage() {
   const terminalScrollbackCustomEnabled = useSettingsStore((s) => s.terminalScrollbackCustomEnabled);
   const terminalScrollbackRows = useSettingsStore((s) => s.terminalScrollbackRows);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
+  const terminalTextColor = useSettingsStore((s) => s.terminalTextColor);
+  const terminalTuiUserColor = useSettingsStore((s) => s.terminalTuiUserColor);
+  const terminalTuiAssistantColor = useSettingsStore((s) => s.terminalTuiAssistantColor);
   const normalizedFontFamily = normalizeTerminalFontFamily(fontFamily);
   const defaultShell = useSettingsStore((s) => s.defaultShell);
   const useExternalTerminal = useSettingsStore((s) => s.useExternalTerminal);
@@ -217,11 +458,15 @@ export function ThemeSettingsPage() {
   const setWorkspanModeEnabled = useTerminalStore((s) => s.setWorkspanModeEnabled);
   const terminalShellProfiles = useSettingsStore((s) => s.terminalShellProfiles);
   const terminalSettingsSectionsExpanded = useSettingsStore((s) => s.terminalSettingsSectionsExpanded);
+  const terminalPaneMarker = useSettingsStore((s) => s.terminalPaneMarker);
   const update = useSettingsStore((s) => s.update);
   const setTerminalThemeMode = useSettingsStore((s) => s.setTerminalThemeMode);
   const [query, setQuery] = useState("");
   const [fontSizeDraft, setFontSizeDraft] = useState(fontSize);
   const [terminalScrollbackRowsDraft, setTerminalScrollbackRowsDraft] = useState(terminalScrollbackRows);
+  const [paneMarkerPreviewColorKey, setPaneMarkerPreviewColorKey] =
+    useState<PaneMarkerPreviewColorKey>("doneColor");
+  const paneMarkerPreviewColor = terminalPaneMarker[paneMarkerPreviewColorKey];
   const displayedTerminalScrollbackRows = terminalScrollbackCustomEnabled
     ? terminalScrollbackRowsDraft
     : TERMINAL_SCROLLBACK_ROWS_DEFAULT;
@@ -237,6 +482,10 @@ export function ThemeSettingsPage() {
   const toggleSection = (key: TerminalSettingsSectionKey) => {
     const nextExpanded = { ...terminalSettingsSectionsExpanded, [key]: !terminalSettingsSectionsExpanded[key] };
     void update("terminalSettingsSectionsExpanded", nextExpanded);
+  };
+
+  const updatePaneMarker = <K extends keyof TerminalPaneMarkerSettings>(key: K, value: TerminalPaneMarkerSettings[K]) => {
+    void update("terminalPaneMarker", { ...terminalPaneMarker, [key]: value });
   };
 
   const scanTerminalShellProfiles = async (platform = osPlatform) => {
@@ -341,6 +590,9 @@ export function ThemeSettingsPage() {
       theme: effective,
     };
   }, [darkThemePalette, effectiveThemeName, language, lightThemePalette, resolvedTheme, selectedPreset]);
+
+  const defaultTerminalTextColor = selectedTheme.theme.foreground ?? "#d8dee9";
+  const previewTerminalTextColor = terminalTextColor || defaultTerminalTextColor;
 
   const themeLibraryOptions = useMemo(
     () => [
@@ -644,7 +896,7 @@ export function ThemeSettingsPage() {
       </Text>
       <Box
         className="rounded-xl border border-border p-4 font-mono"
-        style={{ backgroundColor: "var(--surface-container-lowest)", color: "var(--on-surface)" }}
+        style={{ backgroundColor: "var(--surface-container-lowest)", color: previewTerminalTextColor }}
       >
         <Box style={{ fontFamily: normalizedFontFamily, fontSize: `${fontSize}px` }}>
           <div>$ cli-manager --doctor</div>
@@ -793,6 +1045,52 @@ export function ThemeSettingsPage() {
                 )
               }
             />
+
+            <Box className="overflow-hidden rounded-xl border border-border bg-surface-container-lowest">
+              <Box className="border-b border-border bg-surface-container-low px-3 py-2.5">
+                <Text size="sm" fw={600} c="var(--on-surface)">
+                  {t("settings.terminal.colorGroupTitle")}
+                </Text>
+                <Text mt={3} size="xs" c="var(--on-surface-variant)">
+                  {t("settings.terminal.colorGroupDescription")}
+                </Text>
+              </Box>
+              <Stack gap={0}>
+                <TerminalColorSetting
+                  value={terminalTextColor}
+                  fallbackColor={defaultTerminalTextColor}
+                  label={t("settings.terminal.textColor")}
+                  pickerAriaLabel={t("settings.terminal.textColorPicker")}
+                  hexAriaLabel={t("settings.terminal.textColorHex")}
+                  description={t("settings.terminal.textColorDefaultHint")}
+                  invalidDescription={t("settings.terminal.textColorInvalid")}
+                  restoreLabel={t("settings.terminal.restoreThemeColor")}
+                  onCommit={(value) => void update("terminalTextColor", value)}
+                />
+
+                <TerminalColorSetting
+                  value={terminalTuiUserColor}
+                  fallbackColor={defaultTerminalTextColor}
+                  label={t("settings.terminal.tuiUserColor")}
+                  pickerAriaLabel={t("settings.terminal.tuiUserColorPicker")}
+                  hexAriaLabel={t("settings.terminal.tuiUserColorHex")}
+                  invalidDescription={t("settings.terminal.textColorInvalid")}
+                  restoreLabel={t("settings.terminal.restoreNativeColor")}
+                  onCommit={(value) => void update("terminalTuiUserColor", value)}
+                />
+
+                <TerminalColorSetting
+                  value={terminalTuiAssistantColor}
+                  fallbackColor={defaultTerminalTextColor}
+                  label={t("settings.terminal.tuiAssistantColor")}
+                  pickerAriaLabel={t("settings.terminal.tuiAssistantColorPicker")}
+                  hexAriaLabel={t("settings.terminal.tuiAssistantColorHex")}
+                  invalidDescription={t("settings.terminal.textColorInvalid")}
+                  restoreLabel={t("settings.terminal.restoreNativeColor")}
+                  onCommit={(value) => void update("terminalTuiAssistantColor", value)}
+                />
+              </Stack>
+            </Box>
 
             <Select<string>
               label={text("默认 Shell", "Default Shell")}
@@ -1049,6 +1347,108 @@ export function ThemeSettingsPage() {
                 />
               </Group>
             </Card>
+          </Stack>
+        </CollapsibleSettingsSection>
+
+        <CollapsibleSettingsSection
+          title={t("settings.terminal.paneMarker.title")}
+          description={t("settings.terminal.paneMarker.description")}
+          open={terminalSettingsSectionsExpanded.paneMarker}
+          onToggle={() => toggleSection("paneMarker")}
+        >
+          <Stack gap="md">
+            <Group justify="space-between" align="center" gap="md" wrap="nowrap">
+              <Text size="xs" c="var(--on-surface-variant)">
+                {t("settings.terminal.paneMarker.enabled")}
+              </Text>
+              <Switch
+                color="cliPrimary"
+                checked={terminalPaneMarker.enabled}
+                onChange={(event) => updatePaneMarker("enabled", event.currentTarget.checked)}
+                aria-label={t(
+                  terminalPaneMarker.enabled
+                    ? "settings.terminal.paneMarker.disableAria"
+                    : "settings.terminal.paneMarker.enableAria"
+                )}
+              />
+            </Group>
+
+            <fieldset
+              disabled={!terminalPaneMarker.enabled}
+              aria-disabled={!terminalPaneMarker.enabled}
+              className="m-0 min-w-0 border-0 p-0"
+            >
+              <Stack gap="md" style={!terminalPaneMarker.enabled ? { opacity: 0.55 } : undefined}>
+                <SimpleGrid
+                  cols={{ base: 1, sm: 2 }}
+                  role="group"
+                  aria-label={t("settings.terminal.paneMarker.styleAria")}
+                >
+                  {([
+                    ["full", "settings.terminal.paneMarker.style.full"],
+                    ["tab-top", "settings.terminal.paneMarker.style.tabTop"],
+                  ] as const).map(([style, labelKey]) => (
+                    <PaneMarkerStylePreview
+                      key={style}
+                      style={style}
+                      label={t(labelKey)}
+                      markerColor={paneMarkerPreviewColor}
+                      selected={terminalPaneMarker.style === style}
+                      onSelect={() => updatePaneMarker("style", style)}
+                    />
+                  ))}
+                </SimpleGrid>
+
+                <SimpleGrid cols={{ base: 1, sm: 3 }}>
+                  {PANE_MARKER_PREVIEW_COLOR_OPTIONS.map(([key, labelKey]) => {
+                    const selected = paneMarkerPreviewColorKey === key;
+                    return (
+                      <Stack
+                        key={key}
+                        gap={6}
+                        className="rounded-lg border p-2 transition-colors"
+                        style={{
+                          borderColor: selected ? "var(--primary)" : "var(--border)",
+                          background: selected
+                            ? "color-mix(in srgb, var(--primary) 8%, var(--surface-container-low))"
+                            : "transparent",
+                        }}
+                      >
+                        <UnstyledButton
+                          type="button"
+                          className="ui-focus-ring flex w-full items-center justify-between gap-2 rounded-md text-left"
+                          onClick={() => setPaneMarkerPreviewColorKey(key)}
+                          aria-pressed={selected}
+                        >
+                          <Text
+                            size="xs"
+                            fw={selected ? 600 : 400}
+                            c={selected ? "var(--primary)" : "var(--on-surface-variant)"}
+                          >
+                            {t(labelKey)}
+                          </Text>
+                          {selected && <Check size={13} strokeWidth={2.5} aria-hidden="true" />}
+                        </UnstyledButton>
+                        <Group gap="xs" wrap="nowrap">
+                          <TextInput
+                            type="color"
+                            value={terminalPaneMarker[key]}
+                            onPointerDown={() => setPaneMarkerPreviewColorKey(key)}
+                            onFocus={() => setPaneMarkerPreviewColorKey(key)}
+                            onChange={(event) => updatePaneMarker(key, event.currentTarget.value.toUpperCase())}
+                            w={52}
+                            size="xs"
+                            aria-label={t(`${labelKey}Aria`)}
+                            styles={{ input: { cursor: "pointer", padding: 4 } }}
+                          />
+                          <Text size="xs" ff="monospace">{terminalPaneMarker[key]}</Text>
+                        </Group>
+                      </Stack>
+                    );
+                  })}
+                </SimpleGrid>
+              </Stack>
+            </fieldset>
           </Stack>
         </CollapsibleSettingsSection>
 

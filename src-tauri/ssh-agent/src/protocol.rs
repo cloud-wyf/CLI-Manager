@@ -7,7 +7,11 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-use crate::files::{FileListRequest, FileReadRequest, FileSearchRequest};
+use crate::files::{
+    FileAttachAbortRequest, FileAttachBeginRequest, FileAttachChunkRequest,
+    FileAttachFinishRequest, FileAttachmentUploads, FileListRequest, FileReadRequest,
+    FileSearchRequest,
+};
 use crate::history::{
     HistoryGetRequest, HistoryResumePreflightRequest, HistoryScopeRequest, HistorySearchRequest,
 };
@@ -272,9 +276,12 @@ fn capabilities() -> Value {
         "fileList",
         "fileRead",
         "fileSearch",
+        "fileAttach",
+        "fileAttachAny",
         "gitListRepositories",
         "gitChanges",
         "gitDiff",
+        "gitDiffOptions",
         "gitBranchStatus",
         "gitBranches",
         "gitFull"
@@ -360,6 +367,7 @@ pub fn run_bridge(
     write_preamble(writer, nonce).map_err(|error| format!("preamble_write_failed:{error}"))?;
     let mut hook_binding = None;
     let mut cancelled_requests = CancelledRequests::default();
+    let mut attachment_uploads = FileAttachmentUploads::default();
     while let Some(frame) = read_frame(reader)? {
         let request_id = frame.request_id.clone();
         if !valid_request_id(&request_id)
@@ -423,6 +431,89 @@ pub fn run_bridge(
                         json!({ "code": "history_resume_request_invalid" }),
                     ),
                 };
+            write_frame(writer, &response)?;
+            continue;
+        }
+        if matches!(
+            frame.kind.as_str(),
+            "fileAttachBegin"
+                | "fileAttachChunk"
+                | "fileAttachFinish"
+                | "fileAttachAbort"
+                | "fileAttachAnyBegin"
+                | "fileAttachAnyChunk"
+                | "fileAttachAnyFinish"
+                | "fileAttachAnyAbort"
+        ) {
+            let response = match frame.kind.as_str() {
+                "fileAttachBegin" | "fileAttachAnyBegin" => {
+                    let any_file = frame.kind == "fileAttachAnyBegin";
+                    match serde_json::from_value::<FileAttachBeginRequest>(frame.payload) {
+                        Ok(request) => match if any_file {
+                            attachment_uploads.begin_any(request)
+                        } else {
+                            attachment_uploads.begin(request)
+                        } {
+                            Ok(result) => response(
+                                request_id,
+                                "response",
+                                serde_json::to_value(result).unwrap_or(Value::Null),
+                            ),
+                            Err(code) => response(request_id, "error", json!({ "code": code })),
+                        },
+                        Err(_) => response(
+                            request_id,
+                            "error",
+                            json!({ "code": "remote_file_attachment_request_invalid" }),
+                        ),
+                    }
+                }
+                "fileAttachChunk" | "fileAttachAnyChunk" => {
+                    match serde_json::from_value::<FileAttachChunkRequest>(frame.payload) {
+                        Ok(request) => match attachment_uploads.append(request) {
+                            Ok(received_bytes) => response(
+                                request_id,
+                                "response",
+                                json!({ "receivedBytes": received_bytes }),
+                            ),
+                            Err(code) => response(request_id, "error", json!({ "code": code })),
+                        },
+                        Err(_) => response(
+                            request_id,
+                            "error",
+                            json!({ "code": "remote_file_attachment_request_invalid" }),
+                        ),
+                    }
+                }
+                "fileAttachFinish" | "fileAttachAnyFinish" => {
+                    match serde_json::from_value::<FileAttachFinishRequest>(frame.payload) {
+                        Ok(request) => match attachment_uploads.finish(request) {
+                            Ok(result) => response(
+                                request_id,
+                                "response",
+                                serde_json::to_value(result).unwrap_or(Value::Null),
+                            ),
+                            Err(code) => response(request_id, "error", json!({ "code": code })),
+                        },
+                        Err(_) => response(
+                            request_id,
+                            "error",
+                            json!({ "code": "remote_file_attachment_request_invalid" }),
+                        ),
+                    }
+                }
+                _ => match serde_json::from_value::<FileAttachAbortRequest>(frame.payload) {
+                    Ok(request) => {
+                        let accepted = attachment_uploads.abort(request);
+                        response(request_id, "response", json!({ "accepted": accepted }))
+                    }
+                    Err(_) => response(
+                        request_id,
+                        "error",
+                        json!({ "code": "remote_file_attachment_request_invalid" }),
+                    ),
+                },
+            };
             write_frame(writer, &response)?;
             continue;
         }
@@ -708,6 +799,7 @@ mod tests {
         handle_frame, read_frame, run_bridge, write_frame, write_history_detail_chunks,
         CancelledRequests, ClientFrame, ServerFrame, MAX_CANCELLED_REQUESTS, MAX_FRAME_BYTES,
     };
+    use base64::{engine::general_purpose, Engine as _};
     use serde_json::json;
     use std::io::Cursor;
 
@@ -778,9 +870,12 @@ mod tests {
             "fileList",
             "fileRead",
             "fileSearch",
+            "fileAttach",
+            "fileAttachAny",
             "gitListRepositories",
             "gitChanges",
             "gitDiff",
+            "gitDiffOptions",
             "gitBranchStatus",
             "gitBranches",
             "gitFull",
@@ -881,6 +976,20 @@ mod tests {
     fn oversized_frame_is_rejected() {
         let mut input = Cursor::new(((super::MAX_FRAME_BYTES as u32) + 1).to_be_bytes().to_vec());
         assert_eq!(read_frame(&mut input).unwrap_err(), "frame_size_invalid");
+    }
+
+    #[test]
+    fn maximum_attachment_chunk_fits_the_bridge_frame() {
+        let frame = ClientFrame {
+            request_id: "attachment-1".into(),
+            kind: "fileAttachChunk".into(),
+            payload: json!({
+                "uploadId": "00000000-0000-4000-8000-000000000001",
+                "offset": 0,
+                "dataBase64": general_purpose::STANDARD.encode(vec![0u8; 512 * 1024]),
+            }),
+        };
+        assert!(serde_json::to_vec(&frame).unwrap().len() <= MAX_FRAME_BYTES);
     }
 
     #[test]

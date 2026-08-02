@@ -29,6 +29,23 @@ pub fn run_and_exit(source: &str, event: &str) -> ! {
     exit(0);
 }
 
+pub(crate) fn try_notify_prepared_payload(payload: &Value) -> bool {
+    let Ok(body) = serde_json::to_vec(payload) else {
+        return false;
+    };
+    for attempt in 0..NOTIFY_ATTEMPTS {
+        for target in resolve_notify_targets() {
+            if post(&target.port, &target.token, &body).is_ok() {
+                return true;
+            }
+        }
+        if attempt + 1 < NOTIFY_ATTEMPTS {
+            thread::sleep(NOTIFY_RETRY_DELAY);
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Copy)]
 enum HookNotifyError {
     MissingPort,

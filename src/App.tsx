@@ -57,6 +57,7 @@ import { ALL_TERMINALS_SCOPE } from "./lib/terminalScope";
 import { cleanupTerminalProcessesForExit } from "./lib/terminalExitCleanup";
 import { shouldIncludeDaemonExitTask } from "./lib/terminalExitTask";
 import { requestSidebarToggle } from "./lib/sidebarCommands";
+import { startRuntimeDiagnostics } from "./lib/runtimeDiagnostics";
 import { getTerminalTheme, isLightTerminalTheme } from "./lib/terminalThemes";
 import { resolveProjectForSession } from "./lib/terminalProject";
 import { terminalProcessManager } from "./terminal/core/TerminalProcessManager";
@@ -329,6 +330,33 @@ async function isMainWindowFocused(): Promise<boolean> {
   } catch (err) {
     logWarn("Failed to read main window focus state", err);
     return false;
+  }
+}
+
+async function clearTaskbarAttention(): Promise<void> {
+  if (!IN_TAURI) return;
+  try {
+    await invoke("set_taskbar_attention", { mode: null });
+  } catch (err) {
+    debugConsoleWarn("[Taskbar Attention] Failed to clear:", err);
+  }
+}
+
+async function sendTaskbarAttention(payload: CliHookPayload): Promise<void> {
+  if (!IN_TAURI || !isSystemNotificationEvent(payload.event)) return;
+  const settings = useSettingsStore.getState();
+  if (!settings.taskbarAttentionEnabled || !settings.systemNotificationEvents[payload.event]) return;
+  if (await isMainWindowFocused()) return;
+
+  try {
+    await invoke("set_taskbar_attention", {
+      mode: settings.taskbarAttentionMode,
+      flashCount: settings.taskbarAttentionMode === "finite"
+        ? settings.taskbarAttentionFlashCount
+        : undefined,
+    });
+  } catch (err) {
+    debugConsoleWarn("[Taskbar Attention] Failed to start:", err);
   }
 }
 
@@ -622,6 +650,11 @@ function App() {
     return () => window.removeEventListener("keydown", handleF12, true);
   }, [debugMode]);
 
+  useEffect(() => {
+    if (!IN_TAURI || !debugMode) return;
+    return startRuntimeDiagnostics();
+  }, [debugMode]);
+
   // 关闭期自动备份：先落本地 outbox，再在 8s 内尝试上传；超时后下次启动重试。
   const runCloseAutoSync = useCallback(async () => {
     const showExitNotice = async (message: string) => {
@@ -792,9 +825,7 @@ function App() {
         return;
       }
       if (supportsLocalSubagentTranscript && event.payload.event === "AgentToolStop") {
-        void useTerminalStore.getState().openSubagentTranscript(event.payload).finally(() => {
-          useTerminalStore.getState().finishSubagentTranscript(event.payload);
-        });
+        void useTerminalStore.getState().openSubagentTranscript(event.payload);
         return;
       }
       if (supportsLocalSubagentTranscript && event.payload.event === "SubagentStop") {
@@ -809,6 +840,8 @@ function App() {
       }
       const boundTabId = useTerminalStore.getState().handleCliHookEvent(event.payload);
       handleWebDeviceCliHook(event.payload, boundTabId);
+      // 任务栏提醒独立于 Tab 绑定和系统 Toast；外部 Hook 也可以提醒。
+      void sendTaskbarAttention(event.payload);
       // External hooks (no PTY tab env) still carry a synthetic tabId like external:grok:<session>.
       // Prefer bound session when present; otherwise fall back so toast/system notifications still fire.
       const tabId = boundTabId ?? event.payload.tabId?.trim() ?? null;
@@ -1477,7 +1510,10 @@ function App() {
   useEffect(() => {
     if (!IN_TAURI) return;
     const unlistenPromise = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-      if (focused) backgroundTaskModeActive = false;
+      if (focused) {
+        backgroundTaskModeActive = false;
+        void clearTaskbarAttention();
+      }
     });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten()).catch(() => {});

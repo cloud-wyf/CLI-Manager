@@ -2,6 +2,60 @@
 
 > Executable contracts for terminal tab runtime status events that cross the Rust PTY boundary and the React/Zustand UI boundary.
 
+## Scenario: PTY terminal color capabilities
+
+### 1. Scope / Trigger
+
+- Trigger: changing PTY launch environment defaults or WSL environment forwarding.
+- Goal: child CLIs can select 24-bit color without changing shell/process behavior.
+
+### 2. Signatures
+
+```rust
+fn apply_terminal_capabilities(env_vars: &mut HashMap<String, String>, is_windows: bool);
+fn apply_wsl_env_forwarding(env_vars: &mut HashMap<String, String>);
+```
+
+### 3. Contracts
+
+- Every new PTY receives `COLORTERM=truecolor` unless the caller explicitly supplied `COLORTERM`.
+- Windows must not add or replace `TERM`; non-Windows adds `TERM=xterm-256color` only when absent.
+- WSL adds `COLORTERM` to `WSLENV` without duplicating an existing flagged entry such as
+  `COLORTERM/u`. Existing `WSLENV`, callback variables, and explicit terminal values are preserved.
+- Apply capability defaults before WSL forwarding. Do not alter shell selection, launch arguments,
+  SSH identity, terminal colors, or process lifecycle.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Windows, no terminal variables | Add only `COLORTERM=truecolor` |
+| Non-Windows, no terminal variables | Add `COLORTERM=truecolor` and `TERM=xterm-256color` |
+| Caller supplied either value | Preserve it exactly |
+| WSLENV already contains `COLORTERM` with flags | Do not append another entry |
+
+### 5. Good / Base / Bad Cases
+
+- Good: WSL receives `COLORTERM` through one `WSLENV` entry and Pi emits RGB SGR.
+- Base: an explicit `COLORTERM=24bit` and `TERM=screen-256color` remain unchanged.
+- Bad: set `TERM` on Windows or overwrite a user-provided terminal capability.
+
+### 6. Tests Required
+
+- Rust unit tests assert Windows/non-Windows defaults, explicit-value preservation, and WSLENV
+  de-duplication by variable name rather than the complete flagged entry.
+- Run `cargo test pty::manager::tests --lib`, `cargo fmt -- --check`, and `cargo check`.
+
+### 7. Wrong vs Correct
+
+```rust
+// Wrong: changes Windows TERM and overwrites explicit values.
+env_vars.insert("TERM".into(), "xterm-256color".into());
+
+// Correct: platform-aware defaults preserve caller ownership.
+PtyManager::apply_terminal_capabilities(&mut env_vars, cfg!(target_os = "windows"));
+```
+
 ---
 
 ## Scenario: CLI hook settings installation status
@@ -212,6 +266,9 @@ attention > failed > running > done > none
 
 Hook-driven `attention` must win over shell runtime state until the user activates the tab and clears the hook source.
 
+- A terminal classified as an Agent terminal (`isAgentSession=true`) must use Agent Hook/daemon lifecycle events as the authoritative turn state. The long-lived `codex`, `claude`, or SSH process is not a turn, so shell runtime events for that terminal must not update the Agent task state.
+- PTY output is only a short activity hint when no Hook/daemon lifecycle state exists. It may promote `none` to `running`, but it must never overwrite explicit `running`, `attention`, `done`, or `failed`; `Stop`/`StopFailure` clears the stale output hint.
+
 ### 4. Validation & Error Matrix
 
 | Condition | Required behavior |
@@ -231,6 +288,8 @@ Hook-driven `attention` must win over shell runtime state until the user activat
 | Unknown event name | Ignore the marker and do not update status. |
 | Invalid or missing `exit` on `command_finished` | Treat as failure only when the parsed number is finite and non-zero; otherwise do not invent success. |
 | Hook and shell state conflict | Resolve by priority, never by last-write-wins alone. |
+| Agent terminal emits shell start/prompt markers while its CLI process remains alive | Ignore shell runtime markers for Agent task state; wait for Hook/daemon turn lifecycle events. |
+| PTY repaint arrives after an Agent `Stop`/`StopFailure` | Keep the explicit final state; repaint output must not reopen the turn. |
 
 ### 5. Good/Base/Bad Cases
 
@@ -488,4 +547,92 @@ taskkill /PID <pty-root-pid> /T /F
 
 // Full app exit batches all owned PTY roots once, then direct-kills children as fallback.
 taskkill /F /T /PID <pty-root-1> /PID <pty-root-2>
+```
+
+## Scenario: Resource growth diagnostics
+
+### 1. Scope / Trigger
+
+- Trigger: CPU or memory keeps increasing during a long-running terminal task and the cause is not reproducible on demand.
+- This is a cross-layer observability contract: Rust samples the owned process trees, while the WebView reports runtime object counts and both frontend output queues.
+- Diagnostics must remain passive. They must not drop, compact, reorder, or acknowledge terminal output.
+
+### 2. Signatures
+
+```rust
+pub fn start(initially_enabled: bool)
+pub fn set_enabled(enabled: bool)
+pub async fn set_debug_logging(enabled: bool) -> Result<(), String>
+pub async fn resource_diagnostics_write(entry: ResourceDiagnosticInput) -> Result<(), String>
+```
+
+```ts
+TerminalProcessManager.diagnosticsSnapshot(): TerminalProcessDiagnosticsSnapshot
+PtyHostSocket.diagnosticsSnapshot(): PtyHostDiagnosticsSnapshot
+startRuntimeDiagnostics(): () => void
+```
+
+### 3. Contracts
+
+- `set_debug_logging` controls both the Rust log level and the process sampler. Debug Mode off means no periodic process snapshots.
+- The Tauri WebView starts its runtime sampler only when Debug Mode is enabled and `isTauri()` is true. It samples immediately, then every 30 seconds, and clears the interval when disabled or unmounted.
+- Rust process roles are `app-main`, `webview-child`, `app-child`, `pty-daemon`, and `pty-child`. If trees overlap, the daemon and its descendants take priority over the app tree.
+- Rust is the only file writer. Release builds use `resource-diagnostics.log`; development builds use `resource-diagnostics-dev.log` in the normal log directory.
+- Each line is JSON with `timestamp`, `level`, `source`, `event`, and `payload`. The file reuses the existing 10 MiB/7-day rolling writer.
+- Frontend entries use a dedicated internal IPC and never pass through `logInfo`, so periodic snapshots cannot evict useful crash breadcrumbs.
+- The IPC accepts only the known level/source/event combinations and rejects entries above 64 KiB.
+- Process snapshots may contain only role, PID, process name, CPU percentage, RSS bytes, and aggregate counts. Never log command lines, arguments, paths, environment variables, terminal data, or credentials.
+- WebView snapshots include optional Chromium JS heap values, DOM/canvas/xterm counts, bounded terminal-store counts, socket lifecycle counts, and the five largest queue backlogs.
+- `TerminalProcessManager` and `PtyHostSocket` maintain queued byte totals incrementally. Diagnostics must not rescan or concatenate queued terminal payloads.
+- A session crosses the backlog threshold at 4 MiB or 1024 frames. Emit one warning per crossing. `TerminalProcessManager` rearms only after both values fall below half their thresholds; `PtyHostSocket` rearms when its pending queue is cleared.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Debug Mode is disabled | Do not emit 30-second process or WebView snapshots; threshold warnings remain active. |
+| Frontend sends an unknown level/source/event combination | Reject it with `resource_diagnostics_invalid_entry` and do not write a line. |
+| A serialized entry exceeds 64 KiB | Reject it with `resource_diagnostics_entry_too_large` and do not write a partial line. |
+| The dedicated writer cannot initialize or write | Report the first failure in the main log, suppress repeated failure spam, and return an IPC error. |
+| `performance.memory` is unavailable | Record `jsHeap: null` and continue the rest of the WebView snapshot. |
+| Daemon discovery is missing or stale | Omit the daemon PID and continue classifying the app process tree. |
+| A parent-process cycle or missing parent is encountered | Stop that ancestry walk without hanging or classifying an unrelated process. |
+| Queue stays above a threshold | Do not repeat the warning on every frame or snapshot. |
+| Queue falls below the recovery boundary, then grows again | Emit one recovery/clear log and allow one new warning. |
+| Session is reset, closed, or pending output is delivered | Update byte/frame counters to match the remaining queue and release threshold state. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Debug Mode shows synchronized process and WebView snapshots every 30 seconds, so a growing PTY child can be distinguished from WebView heap or output backlog growth.
+- Base: Debug Mode is off; normal terminal behavior is unchanged, but a 4 MiB hidden-output backlog still produces one warning.
+- Bad: logging terminal text or command lines turns a diagnostic feature into a credential and privacy leak.
+- Bad: recalculating queued bytes by joining or decoding every frame adds CPU and allocation pressure to the path being diagnosed.
+
+### 6. Tests Required
+
+- Rust unit tests cover daemon-tree priority, unrelated-process exclusion, and cyclic parent maps.
+- `TerminalProcessManager` tests cover queued byte accounting, commit drain, reset, close, warning de-duplication, recovery, and warning rearm.
+- `PtyHostSocket` tests cover pending byte accounting, listener delivery, close cleanup, warning de-duplication, clear, and warning rearm.
+- Run `npx tsc --noEmit`, `cargo fmt -- --check`, `cargo check`, and `cargo test`.
+- Rust tests cover JSONL shape, entry-size bounds, and the frontend route allowlist.
+- Runtime confirmation is manual: enable Debug Mode and verify `process` and `webview` runtime snapshots in `%USERPROFILE%\.cli-manager\logs\resource-diagnostics.log`; AI agents must not launch the Tauri app.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+const queuedBytes = frames.reduce((total, frame) => total + frame.data.byteLength, 0);
+logInfo("queue", { command, terminalText, queuedBytes });
+```
+
+#### Correct
+
+```ts
+state.queuedBytes += frame.data.byteLength;
+writeResourceDiagnostic("warn", "terminalProcessManager", "backlogThresholdExceeded", {
+  sessionId,
+  queuedFrames: state.frames.length,
+  queuedBytes: state.queuedBytes,
+});
 ```

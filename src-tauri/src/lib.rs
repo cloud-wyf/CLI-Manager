@@ -20,6 +20,7 @@ mod linux_graphics;
 mod log_rotation;
 mod process_job;
 pub mod pty;
+mod runtime_diagnostics;
 mod shell_resolver;
 mod ssh_agent_supply_chain;
 pub mod ssh_askpass;
@@ -795,6 +796,7 @@ pub fn run() {
             conpty_sideload::initialize(app.handle());
             // 保留应用自身调试日志，但压掉 sqlx 的逐条 SQL 输出。
             log::set_max_level(log_level);
+            runtime_diagnostics::start(debug_logs);
             // PtyHost 是唯一生产终端路径。后台线程发现/拉起 daemon，成功后写入 bridge；
             // 失败只记日志并让终端创建明确失败，不恢复已删除的进程内 PTY 路径。
             {
@@ -931,6 +933,7 @@ pub fn run() {
             commands::cc_connect::cc_connect_get_logs,
             commands::cc_connect::handoff::cc_connect_handoff_status,
             commands::cc_connect::handoff::cc_connect_handoff_platforms,
+            commands::cc_connect::handoff::cc_connect_handoff_preflight,
             commands::cc_connect::handoff::cc_connect_handoff_start,
             commands::cc_connect::handoff::cc_connect_handoff_cancel,
             commands::cc_connect::handoff_notification::cc_connect_handoff_notification_status,
@@ -946,6 +949,7 @@ pub fn run() {
             commands::desktop_pet::desktop_pet_window_hide,
             commands::desktop_pet::desktop_pet_window_reset_position,
             commands::terminal_shell::terminal_shell_scan,
+            commands::terminal_shell::terminal_shell_icon,
             commands::ssh::ssh_client_status,
             commands::ssh::ssh_test_connection,
             commands::ssh::ssh_agent_probe,
@@ -974,6 +978,7 @@ pub fn run() {
             commands::ssh_config::ssh_config_import_preview,
             commands::third_party_notification::third_party_notification_test_send,
             commands::logging::set_debug_logging,
+            commands::logging::resource_diagnostics_write,
             commands::fs::clipboard_read_file_paths,
             commands::fs::check_paths_exist,
             commands::fs::file_get_path_kind,
@@ -1030,6 +1035,8 @@ pub fn run() {
             commands::ssh_files::ssh_remote_file_list,
             commands::ssh_files::ssh_remote_file_read,
             commands::ssh_files::ssh_remote_file_search,
+            commands::ssh_files::ssh_remote_file_attach_data,
+            commands::ssh_files::ssh_remote_file_attach_path,
             commands::ssh_git::ssh_remote_git_request,
             commands::history::history_get_conversion_matrix,
             commands::history::history_refresh_index,
@@ -1161,6 +1168,7 @@ pub fn run() {
             commands::system_notification::is_wsl,
             commands::system_notification::send_notification_via_windows,
             commands::system_notification::send_interactive_system_notification,
+            commands::system_notification::set_taskbar_attention,
             statusline::statusline_get_status,
             statusline::statusline_load_settings,
             statusline::statusline_save_settings,

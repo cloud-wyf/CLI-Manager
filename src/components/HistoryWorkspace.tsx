@@ -11,15 +11,18 @@ import { useExternalSessionSyncStore } from "../stores/externalSessionSyncStore"
 import { useI18n } from "../lib/i18n";
 import { getHistoryPathArgs } from "../lib/historyPathArgs";
 import { inferSubagentParentSessionId } from "../lib/historySubagents";
-import { findLocalHistoryCwdProjects } from "../lib/historyResumeProject";
+import {
+  findLocalHistoryCwdProjects,
+  matchesHistoryProjectSource,
+  selectLocalHistoryResumeProject,
+} from "../lib/historyResumeProject";
+import { buildHistoryResumeCommand } from "../lib/historyResumeCommand";
 import { sameHistorySessionIdentity } from "../lib/historySessionIdentity";
 import {
   HISTORY_SOURCE_DESCRIPTOR_BY_ID,
   type HistorySourceId,
 } from "../lib/historySources";
 import { findWorktreeByPath, projectWithWorktreeProviderOverrides } from "../lib/terminalProject";
-import { appendResumeCliArgs } from "../lib/projectStartupCommand";
-import { getProviderSwitchAppType } from "../lib/providerSwitching";
 import { projectSupportsCapability } from "../lib/projectCapabilities";
 import { PromptLibrary } from "./prompts/PromptLibrary";
 import { DiffModal } from "./history/DiffModal";
@@ -68,20 +71,6 @@ function matchesSourceFilter(source: string, sourceFilter: HistorySourceFilter):
   return sourceFilter === "all" || source.toLowerCase() === sourceFilter;
 }
 
-function projectPathName(path: string): string {
-  const normalized = path.trim().replace(/\\/g, "/").replace(/\/+$/g, "");
-  return normalized.split("/").filter(Boolean).pop() ?? "";
-}
-
-function claudeProjectKeyFromPath(path: string): string {
-  return path
-    .trim()
-    .replace(/:/g, "-")
-    .replace(/[\\/]/g, "-")
-    .replace(/-+$/g, "")
-    .toLowerCase();
-}
-
 function isAbsolutePathLike(value: string): boolean {
   const trimmed = value.trim();
   return /^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\") || trimmed.startsWith("/");
@@ -99,34 +88,6 @@ function parseProjectEnvVars(project?: Project | null): Record<string, string> |
   }
 }
 
-function matchesHistorySource(project: Project, source: string): boolean {
-  if (source === "grok") {
-    return project.cli_tool.trim().toLowerCase().includes("grok");
-  }
-  return getProviderSwitchAppType(project) === source;
-}
-
-function findHistoryProjects(session: HistorySessionView | HistorySessionDetail, projects: Project[]): Project[] {
-  const sourceProjects = projects.filter((project) => matchesHistorySource(project, session.source));
-  const cwdProjects = findLocalHistoryCwdProjects(session, sourceProjects);
-  if (cwdProjects.length > 0) return cwdProjects;
-
-  const normalizedProjectKey = normalizePathKey(session.project_key);
-  if (!normalizedProjectKey) return [];
-  const normalizedProjectKeyLower = normalizedProjectKey.toLowerCase();
-
-  return sourceProjects.filter((project) => {
-    const projectPath = normalizePathKey(project.path);
-    const projectName = project.name.trim().toLowerCase();
-    return (
-      projectPath === normalizedProjectKey ||
-      claudeProjectKeyFromPath(project.path) === normalizedProjectKeyLower ||
-      projectPathName(project.path).toLowerCase() === normalizedProjectKeyLower ||
-      projectName === normalizedProjectKeyLower
-    );
-  });
-}
-
 function findRemoteHistoryProjects(
   session: HistorySessionView | HistorySessionDetail,
   projects: Project[],
@@ -135,7 +96,7 @@ function findRemoteHistoryProjects(
   const sourceProjects = projects.filter((project) => (
     project.environment_type === "ssh"
     && project.ssh_host_id === hostId
-    && matchesHistorySource(project, session.source)
+    && matchesHistoryProjectSource(project, session.source)
   ));
   const cwd = "cwd" in session ? session.cwd?.trim() : null;
   if (!cwd) return [];
@@ -143,23 +104,9 @@ function findRemoteHistoryProjects(
   return sourceProjects.filter((project) => normalizePathKey(project.remote_path) === normalizedCwd);
 }
 
-function resolveResumeCommand(session: HistorySessionView | HistorySessionDetail, project?: Project | null): string | null {
-  const sessionId = session.session_id.trim();
-  if (!sessionId || /\s/.test(sessionId) || /[\r\n]/.test(sessionId)) return null;
-  if (session.source === "claude") return appendResumeCliArgs(`claude --resume ${sessionId}`, "claude", project);
-  if (session.source === "codex") return appendResumeCliArgs(`codex resume ${sessionId}`, "codex", project);
-  if (session.source === "grok") return appendResumeCliArgs(`grok --resume ${sessionId}`, "grok", project);
-  return null;
-}
-
 function findHistoryWorktree(session: HistorySessionView | HistorySessionDetail, worktrees: WorktreeRecord[]): WorktreeRecord | null {
   const cwd = "cwd" in session ? session.cwd?.trim() : null;
   return findWorktreeByPath(worktrees, cwd) ?? findWorktreeByPath(worktrees, session.project_key);
-}
-
-function findProjectForWorktree(worktree: WorktreeRecord | null, projects: Project[]): Project | null {
-  if (!worktree) return null;
-  return projects.find((project) => project.id === worktree.project_id) ?? null;
 }
 
 function resolveHistoryResumeCwd(
@@ -932,7 +879,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
       return;
     }
     const launchProject = project && worktree ? projectWithWorktreeProviderOverrides(project, worktree) : project;
-    const command = resolveResumeCommand(session, launchProject);
+    const command = buildHistoryResumeCommand(session, launchProject);
     if (!command) {
       toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.invalidSession") });
       return;
@@ -955,7 +902,9 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
         launchProject ? parseProjectEnvVars(launchProject) : undefined,
         shell,
         undefined,
-        worktree?.id
+        worktree?.id,
+        undefined,
+        session.session_id.trim(),
       );
       setResumeIntent(null);
       closeHistory();
@@ -973,7 +922,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
       const hostProjects = projects.filter((project) => (
         project.environment_type === "ssh"
         && project.ssh_host_id === remoteContext.hostId
-        && matchesHistorySource(project, session.source)
+        && matchesHistoryProjectSource(project, session.source)
         && (project.cli_config_root.trim()
           ? project.cli_config_root.trim() === remoteContext.configuredConfigRoot.trim()
           : remoteContext.scopeKind === "hostPrimary")
@@ -994,12 +943,19 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
       return;
     }
     const worktree = findHistoryWorktree(session, worktrees);
-    const worktreeProject = findProjectForWorktree(worktree, historyProjects);
-    const matchedProjects = findHistoryProjects(session, historyProjects);
+    const selection = selectLocalHistoryResumeProject(
+      session,
+      historyProjects,
+      worktree,
+      projectIdFilter,
+    );
     const cwdProjects = findLocalHistoryCwdProjects(session, historyProjects);
-    const candidates = worktreeProject && matchesHistorySource(worktreeProject, session.source)
-      ? [worktreeProject]
-      : matchedProjects;
+    const candidates = selection.candidates;
+
+    if (selection.project) {
+      void resumeSession(session, title, selection.project, selection.worktree);
+      return;
+    }
 
     if (candidates.length === 0) {
       if (cwdProjects.length === 1) {
@@ -1009,12 +965,8 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
       setResumeIntent({ session, title, worktree: null, projects, allowNewWindow: true, remote: false });
       return;
     }
-    if (candidates.length === 1) {
-      void resumeSession(session, title, candidates[0], worktree);
-      return;
-    }
-    setResumeIntent({ session, title, worktree, projects: candidates, allowNewWindow: false, remote: false });
-  }, [historyProjects, projects, remoteContext, resumeSession, t, worktrees]);
+    setResumeIntent({ session, title, worktree: null, projects: candidates, allowNewWindow: false, remote: false });
+  }, [historyProjects, projectIdFilter, projects, remoteContext, resumeSession, t, worktrees]);
 
   const resumeConversation = useCallback(() => {
     if (!activeSession || !activeView) {

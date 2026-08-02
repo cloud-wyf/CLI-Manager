@@ -2,6 +2,8 @@ use super::handoff::{
     send_handoff_notification_once, HandoffNotificationSendError, HANDOFF_NOTIFICATION_ATTEMPTS,
     HANDOFF_NOTIFICATION_RETRY_DELAY,
 };
+#[cfg(test)]
+use super::handoff_session::CcConnectHandoffTransport;
 use super::handoff_session::{load_handoff_record, PersistedHandoffRecord};
 use super::*;
 use crate::daemon::discovery::{daemon_info_path, is_pid_alive, read_daemon_info, DaemonInfo};
@@ -984,6 +986,9 @@ mod tests {
             source_project_name: "Source".to_string(),
             source_project_path: r"F:\source".to_string(),
             started_at_ms: 100,
+            transport: CcConnectHandoffTransport::Local,
+            ssh_host_id: None,
+            remote_path: None,
         }
     }
 

@@ -20,6 +20,7 @@ const proxyEnvironmentKeys = [
   "CLI_MANAGER_CODEX_ENV_KEY_OVERRIDE",
   "CLI_MANAGER_CODEX_MODEL_OVERRIDE",
   "CLI_MANAGER_CODEX_WIRE_API_OVERRIDE",
+  "CLI_MANAGER_CODEX_SSH_LAUNCH",
   "CLI_MANAGER_TEST_API_KEY",
 ];
 const providerSecret = "sk-e2e-secret-value";

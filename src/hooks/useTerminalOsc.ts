@@ -102,27 +102,27 @@ export function useTerminalOsc({
         }
         break;
       }
+      // OSC markers can bracket normal CSI/text; preserve that gap before parsing the next marker.
+      output += combined.slice(cursor, start);
 
       const matched = matchIntegrationOscPrefix(combined, start);
       if (matched.kind === "none") {
-        output += combined.slice(cursor, start + 2);
+        output += combined.slice(start, start + 2);
         cursor = start + 2;
         continue;
       }
       if (matched.kind === "partial") {
-        output += combined.slice(cursor, start);
         runtimeOscBufferRef.current = combined.slice(start);
         break;
       }
 
       const terminator = findOscTerminator(combined, start + matched.prefix.length);
       if (terminator === null) {
-        output += combined.slice(cursor, start);
         runtimeOscBufferRef.current = combined.slice(start);
         break;
       }
       if ("abortAt" in terminator) {
-        output += combined.slice(cursor, terminator.abortAt);
+        output += combined.slice(start, terminator.abortAt);
         cursor = terminator.abortAt;
         continue;
       }

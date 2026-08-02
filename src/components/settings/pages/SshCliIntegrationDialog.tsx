@@ -18,6 +18,7 @@ import type {
   SshToolSource,
 } from "../../../lib/types";
 import { useI18n, type TranslationKey } from "../../../lib/i18n";
+import { useSshDirectoryBrowser } from "../../../hooks/useSshDirectoryBrowser";
 import { useBackgroundOperationStore } from "../../../stores/backgroundOperationStore";
 import { useSshAgentIntegrationStore } from "../../../stores/sshAgentIntegrationStore";
 import { useProjectStore } from "../../../stores/projectStore";
@@ -26,11 +27,6 @@ import { Button } from "../../ui/button";
 import { ConfirmDialog } from "../../ConfirmDialog";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../../ui/dialog";
 import { Input } from "../../ui/input";
-
-interface SshDirectoryEntry {
-  name: string;
-  path: string;
-}
 
 interface Props {
   open: boolean;
@@ -42,6 +38,10 @@ interface Props {
 const SOURCES: SshToolSource[] = ["claude", "codex"];
 const OFFICIAL_AGENT_MANIFEST_PATH = /^\/dark-hxx\/CLI-Manager\/releases\/(?:latest\/download|download\/[^/]+)\/ssh-agent-release-manifest\.json$/;
 const R2_AGENT_MANIFEST_PATH = "/CLI-Manager/releases/ssh-agent/latest/ssh-agent-release-manifest.json";
+const DEFAULT_R2_PUBLIC_BASE_URL = "https://github.bwm.de5.net";
+const R2_PUBLIC_BASE_URL = (
+  import.meta.env.VITE_R2_PUBLIC_BASE_URL?.trim() || DEFAULT_R2_PUBLIC_BASE_URL
+).replace(/\/+$/, "");
 
 function savedManifestInput(value: string | null | undefined): string {
   const trimmed = value?.trim() ?? "";
@@ -49,7 +49,10 @@ function savedManifestInput(value: string | null | undefined): string {
   try {
     const url = new URL(trimmed);
     return (url.hostname === "github.com" && OFFICIAL_AGENT_MANIFEST_PATH.test(url.pathname))
-      || (url.hostname === "github.bwm.de5.net" && url.pathname === R2_AGENT_MANIFEST_PATH)
+      || (
+        (url.origin === R2_PUBLIC_BASE_URL || url.origin === DEFAULT_R2_PUBLIC_BASE_URL)
+        && url.pathname === R2_AGENT_MANIFEST_PATH
+      )
       ? ""
       : trimmed;
   } catch {
@@ -140,7 +143,7 @@ const HOOK_FILE_ROLE_KEYS: Record<string, TranslationKey> = {
   unknown: "settings.sshHosts.cliIntegration.hook.file.unknown",
 };
 
-const R2_INSTALL_SCRIPT_URL = "https://github.bwm.de5.net/CLI-Manager/releases/ssh-agent/latest/install-ssh-agent.sh";
+const R2_INSTALL_SCRIPT_URL = `${R2_PUBLIC_BASE_URL}/CLI-Manager/releases/ssh-agent/latest/install-ssh-agent.sh`;
 const GITHUB_INSTALL_SCRIPT_URL = "https://github.com/dark-hxx/CLI-Manager/releases/latest/download/install-ssh-agent.sh";
 
 export function SshCliIntegrationDialog({ open, host, hosts, onOpenChange }: Props) {
@@ -161,10 +164,15 @@ export function SshCliIntegrationDialog({ open, host, hosts, onOpenChange }: Pro
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [pickerSource, setPickerSource] = useState<SshToolSource | null>(null);
-  const [pickerPath, setPickerPath] = useState("/");
-  const [directories, setDirectories] = useState<SshDirectoryEntry[]>([]);
-  const [pickerLoading, setPickerLoading] = useState(false);
-  const [pickerError, setPickerError] = useState("");
+  const {
+    path: pickerPath,
+    setPath: setPickerPath,
+    entries: directories,
+    loading: pickerLoading,
+    error: pickerError,
+    load: loadPickerDirectories,
+    close: closePickerDirectories,
+  } = useSshDirectoryBrowser(host, hosts);
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<SshAgentProbeResult | null>(null);
   const [probeError, setProbeError] = useState("");
@@ -416,23 +424,13 @@ export function SshCliIntegrationDialog({ open, host, hosts, onOpenChange }: Pro
 
   const loadDirectories = async (source: SshToolSource, path: string) => {
     if (!host) return;
-    const normalizedPath = path.trim() || "/";
     setPickerSource(source);
-    setPickerPath(normalizedPath);
-    setPickerLoading(true);
-    setPickerError("");
-    try {
-      const entries = await invoke<SshDirectoryEntry[]>("ssh_list_directories", {
-        spec: buildSshConnectionSpec(host, hosts),
-        path: normalizedPath,
-      });
-      setDirectories(entries);
-    } catch (nextError) {
-      setDirectories([]);
-      setPickerError(String(nextError));
-    } finally {
-      setPickerLoading(false);
-    }
+    await loadPickerDirectories(path);
+  };
+
+  const closeDirectoryPicker = () => {
+    setPickerSource(null);
+    closePickerDirectories();
   };
 
   const save = async () => {
@@ -1011,7 +1009,7 @@ export function SshCliIntegrationDialog({ open, host, hosts, onOpenChange }: Pro
         onConfirm={() => { if (confirmAction) void runAgentManagement(confirmAction); }}
       />
 
-      <Dialog open={pickerSource !== null} onOpenChange={(nextOpen) => { if (!nextOpen) setPickerSource(null); }}>
+      <Dialog open={pickerSource !== null} onOpenChange={(nextOpen) => { if (!nextOpen) closeDirectoryPicker(); }}>
         <DialogContent className="w-[calc(100vw-2rem)] max-w-xl p-0">
           <div className="border-b border-border px-4 py-3">
             <DialogTitle>{t("settings.sshHosts.cliIntegration.pickerTitle")}</DialogTitle>
@@ -1026,7 +1024,7 @@ export function SshCliIntegrationDialog({ open, host, hosts, onOpenChange }: Pro
                 <ArrowUp className="h-4 w-4" />
               </Button>
               <Input value={pickerPath} onChange={(event) => setPickerPath(event.target.value)} className="flex-1 font-mono text-sm" />
-              <Button type="button" variant="outline" onClick={() => { if (pickerSource) void loadDirectories(pickerSource, pickerPath); }}>{t("common.refresh")}</Button>
+              <Button type="button" variant="outline" onClick={() => { if (pickerSource) void loadPickerDirectories(pickerPath, { force: true }); }}>{t("common.refresh")}</Button>
             </div>
             <div className="max-h-72 min-h-48 overflow-y-auto rounded-md border border-border p-1">
               {pickerLoading && <div className="p-4 text-sm text-text-muted">{t("common.loading")}</div>}
@@ -1040,10 +1038,10 @@ export function SshCliIntegrationDialog({ open, host, hosts, onOpenChange }: Pro
             </div>
           </div>
           <DialogFooter className="border-t border-border px-4 py-3">
-            <Button type="button" variant="outline" onClick={() => setPickerSource(null)}>{t("common.cancel")}</Button>
+            <Button type="button" variant="outline" onClick={closeDirectoryPicker}>{t("common.cancel")}</Button>
             <Button type="button" onClick={() => {
               if (pickerSource) setRoots((current) => ({ ...current, [pickerSource]: pickerPath.trim() || "/" }));
-              setPickerSource(null);
+              closeDirectoryPicker();
             }}>{t("configModal.ssh.selectCurrentDirectory")}</Button>
           </DialogFooter>
         </DialogContent>

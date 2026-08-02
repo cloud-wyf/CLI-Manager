@@ -28,6 +28,19 @@ function identity(sourceName, sessionId, filePath) {
   return { source: sourceName, session_id: sessionId, file_path: filePath };
 }
 
+function sshIdentity(sourceName, sessionId, sourceInstanceId = "ssh-instance") {
+  return {
+    ...identity(sourceName, sessionId, ""),
+    session_ref: {
+      sourceId: sourceName,
+      sourceInstanceId,
+      sourceSessionId: sessionId,
+      transportKind: "ssh",
+      rawPointers: [],
+    },
+  };
+}
+
 test("matches equivalent Windows history paths", () => {
   assert.equal(
     sameHistorySessionIdentity(
@@ -52,4 +65,46 @@ test("rejects stale source, session, or file identities", () => {
 test("requires a complete identity", () => {
   assert.equal(sameHistorySessionIdentity(identity("claude", "", "session.jsonl"), identity("claude", "", "session.jsonl")), false);
   assert.equal(sameHistorySessionIdentity(identity("claude", "id", ""), identity("claude", "id", "")), false);
+});
+
+test("matches SSH history by its stable session reference without a local file path", () => {
+  assert.equal(
+    sameHistorySessionIdentity(
+      sshIdentity("Codex", "SESSION-1"),
+      sshIdentity("codex", "session-1")
+    ),
+    true
+  );
+});
+
+test("rejects incomplete, mixed, or changed SSH session references", () => {
+  const current = sshIdentity("codex", "session-1");
+  assert.equal(
+    sameHistorySessionIdentity(current, sshIdentity("codex", "session-1", "other-instance")),
+    false
+  );
+  assert.equal(
+    sameHistorySessionIdentity(current, identity("codex", "session-1", "")),
+    false
+  );
+  assert.equal(
+    sameHistorySessionIdentity(current, {
+      ...sshIdentity("codex", "session-1"),
+      session_ref: {
+        ...current.session_ref,
+        sourceSessionId: "other-session",
+      },
+    }),
+    false
+  );
+  assert.equal(
+    sameHistorySessionIdentity(current, {
+      ...sshIdentity("codex", "session-1"),
+      session_ref: {
+        ...current.session_ref,
+        sourceId: "claude",
+      },
+    }),
+    false
+  );
 });

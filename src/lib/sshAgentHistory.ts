@@ -5,7 +5,7 @@ import { resolveSshToolSource } from "./sshToolIntegration";
 import { useSshAgentIntegrationStore } from "../stores/sshAgentIntegrationStore";
 import { useSshHostStore } from "../stores/sshHostStore";
 
-export interface SshAgentHistoryLaunch extends SshConnectionSpecPayload {
+export interface SshAgentProjectLaunch extends SshConnectionSpecPayload {
   hostId: string;
   remotePath: string;
   clientInstanceId: string;
@@ -15,10 +15,14 @@ export interface SshAgentHistoryLaunch extends SshConnectionSpecPayload {
   agentPath: string;
   agentInstallationId: string;
   agentRemoteMachineId: string;
-  toolSource: SshToolSource;
+  toolSource: SshToolSource | "";
   environmentOverrides: Record<string, string>;
   initializationCommand: null;
   startupCommand: null;
+}
+
+export interface SshAgentHistoryLaunch extends SshAgentProjectLaunch {
+  toolSource: SshToolSource;
 }
 
 export interface SshAgentHistoryContext {
@@ -35,12 +39,21 @@ export interface SshAgentHistoryContext {
   launch: SshAgentHistoryLaunch;
 }
 
-export async function buildSshAgentHistoryContext(project: Project): Promise<SshAgentHistoryContext> {
+export function buildSshAgentProjectLaunch(
+  project: Project,
+  toolSource: SshToolSource,
+): Promise<SshAgentHistoryLaunch>;
+export function buildSshAgentProjectLaunch(
+  project: Project,
+  toolSource?: "",
+): Promise<SshAgentProjectLaunch>;
+export async function buildSshAgentProjectLaunch(
+  project: Project,
+  toolSource: SshToolSource | "" = "",
+): Promise<SshAgentProjectLaunch> {
   if (project.environment_type !== "ssh" || !project.ssh_host_id?.trim() || !project.remote_path.trim()) {
     throw new Error("ssh_project_configuration_invalid");
   }
-  const source = resolveSshToolSource(project.cli_tool);
-  if (!source) throw new Error("history_remote_source_required");
 
   const hostStore = useSshHostStore.getState();
   if (!hostStore.loaded) await hostStore.fetchHosts();
@@ -57,19 +70,46 @@ export async function buildSshAgentHistoryContext(project: Project): Promise<Ssh
   if (!installation?.install_path || !installation.installation_id || !installation.remote_machine_id) {
     throw new Error("ssh_agent_not_installed");
   }
+  const clientInstanceId = getSshClientInstanceId();
+  return {
+    ...buildSshConnectionSpec(host, hosts),
+    hostId: host.id,
+    remotePath: project.remote_path.trim(),
+    clientInstanceId,
+    projectId: project.id,
+    projectName: project.name,
+    bridgeEpoch: crypto.randomUUID(),
+    agentPath: installation.install_path,
+    agentInstallationId: installation.installation_id,
+    agentRemoteMachineId: installation.remote_machine_id,
+    toolSource,
+    environmentOverrides: {},
+    initializationCommand: null,
+    startupCommand: null,
+  };
+}
+
+export async function buildSshAgentHistoryContext(project: Project): Promise<SshAgentHistoryContext> {
+  if (project.environment_type !== "ssh" || !project.ssh_host_id?.trim() || !project.remote_path.trim()) {
+    throw new Error("ssh_project_configuration_invalid");
+  }
+  const source = resolveSshToolSource(project.cli_tool);
+  if (!source) throw new Error("history_remote_source_required");
+
+  const launch = await buildSshAgentProjectLaunch(project, source);
+  const state = useSshAgentIntegrationStore.getState();
   const hostRoot = state.preferences.find(
-    (preference) => preference.host_id === host.id && preference.source === source,
+    (preference) => preference.host_id === launch.hostId && preference.source === source,
   )?.configured_root.trim() ?? "";
   const configuredConfigRoot = project.cli_config_root.trim() || hostRoot;
   const integration = state.integrations.find((candidate) => (
-    candidate.host_id === host.id
+    candidate.host_id === launch.hostId
     && candidate.source === source
     && candidate.configured_root === configuredConfigRoot
     && candidate.cleanup_state === "active"
   ));
-  const clientInstanceId = getSshClientInstanceId();
   return {
-    hostId: host.id,
+    hostId: launch.hostId,
     source,
     configuredConfigRoot,
     sourceInstanceId: integration?.history_source_instance_id ?? "",
@@ -77,23 +117,8 @@ export async function buildSshAgentHistoryContext(project: Project): Promise<Ssh
     generation: 0,
     hasMore: true,
     scopeKind: project.cli_config_root.trim() ? "projectOverride" : "hostPrimary",
-    consumerId: `history:${clientInstanceId}:${host.id}:${source}:${project.id}`,
+    consumerId: `history:${launch.clientInstanceId}:${launch.hostId}:${source}:${project.id}`,
     projectPaths: [project.remote_path.trim()],
-    launch: {
-      ...buildSshConnectionSpec(host, hosts),
-      hostId: host.id,
-      remotePath: project.remote_path.trim(),
-      clientInstanceId,
-      projectId: project.id,
-      projectName: project.name,
-      bridgeEpoch: crypto.randomUUID(),
-      agentPath: installation.install_path,
-      agentInstallationId: installation.installation_id,
-      agentRemoteMachineId: installation.remote_machine_id,
-      toolSource: source,
-      environmentOverrides: {},
-      initializationCommand: null,
-      startupCommand: null,
-    },
+    launch,
   };
 }

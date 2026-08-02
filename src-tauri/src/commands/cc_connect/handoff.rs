@@ -27,6 +27,9 @@ struct ResolvedHandoffTarget {
     project: RegisteredProject,
     worktree_id: Option<String>,
     worktree_name: Option<String>,
+    work_dir: String,
+    transport: CcConnectHandoffTransport,
+    ssh_host_id: Option<String>,
 }
 
 struct WeixinTokenTransfer {
@@ -111,6 +114,46 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     }
 }
 
+fn normalized_remote_directory(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if !raw.starts_with('/') || raw.contains(['\0', '\r', '\n', '\\']) {
+        return Err("handoff_work_dir_missing".to_string());
+    }
+    let mut segments = Vec::new();
+    for segment in raw.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => return Err("handoff_work_dir_outside_project".to_string()),
+            value => segments.push(value),
+        }
+    }
+    Ok(if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    })
+}
+
+fn remote_path_is_within(path: &str, root: &str) -> bool {
+    path == root || root == "/" || path.starts_with(&format!("{}/", root.trim_end_matches('/')))
+}
+
+fn ssh_handoff_work_dir(
+    project_id: &str,
+    ssh_host_id: &str,
+    remote_path: &str,
+) -> Result<PathBuf, String> {
+    let digest = Sha256::digest(format!("{project_id}\0{ssh_host_id}\0{remote_path}").as_bytes());
+    let directory = remote_manager_dir()?
+        .join("ssh-handoff-workdirs")
+        .join(format!("{digest:x}"));
+    fs::create_dir_all(&directory)
+        .map_err(|err| format!("create SSH handoff work directory failed: {err}"))?;
+    directory
+        .canonicalize()
+        .map_err(|err| format!("canonicalize SSH handoff work directory failed: {err}"))
+}
+
 fn load_registered_worktree(worktree_id: &str) -> Result<Option<RegisteredWorktree>, String> {
     let database_path = crate::app_paths::db_path()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -169,6 +212,12 @@ fn load_provider_catalog_sync(profile: &CcConnectProfile) -> Result<ProviderCata
 }
 
 fn provider_display_name(language: CcConnectLanguage, project: &RegisteredProject) -> String {
+    if project.environment_type == "ssh" {
+        return match language {
+            CcConnectLanguage::Zh => "远端 Codex 配置".to_string(),
+            CcConnectLanguage::En => "Remote Codex configuration".to_string(),
+        };
+    }
     match (
         language,
         project.provider_name.as_deref().map(single_line),
@@ -194,6 +243,51 @@ fn resolve_handoff_target(
         .ok_or_else(|| "handoff_project_not_registered".to_string())?;
     if project.agent != CcConnectAgent::Codex {
         return Err("handoff_codex_only".to_string());
+    }
+
+    if project.environment_type == "ssh" {
+        if request
+            .worktree_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err("handoff_ssh_worktree_unsupported".to_string());
+        }
+        let ssh_host_id = project
+            .ssh_host_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "handoff_ssh_host_missing".to_string())?
+            .to_string();
+        let root_path = normalized_remote_directory(&project.remote_path)?;
+        let work_dir = normalized_remote_directory(&request.work_dir)?;
+        if !remote_path_is_within(&work_dir, &root_path) {
+            return Err("handoff_work_dir_outside_project".to_string());
+        }
+        let local_work_dir = ssh_handoff_work_dir(&project.id, &ssh_host_id, &work_dir)?;
+        let local_work_dir = user_path_string(&local_work_dir);
+        project.path = local_work_dir.clone();
+        project.remote_path = work_dir.clone();
+        project.provider_id = None;
+        project.codex_provider_id = None;
+        project.provider_name = None;
+        project.provider_is_global = true;
+
+        let mut profile = base_profile.clone();
+        profile.project_id = project.id.clone();
+        profile.project_name = project.name.clone();
+        profile.project_path = local_work_dir;
+        profile.agent = CcConnectAgent::Codex;
+        return Ok(ResolvedHandoffTarget {
+            profile,
+            project,
+            worktree_id: None,
+            worktree_name: None,
+            work_dir,
+            transport: CcConnectHandoffTransport::Ssh,
+            ssh_host_id: Some(ssh_host_id),
+        });
     }
 
     let (root_path, worktree_id, worktree_name) = if let Some(worktree_id) = request
@@ -239,7 +333,7 @@ fn resolve_handoff_target(
     let mut profile = base_profile.clone();
     profile.project_id = project.id.clone();
     profile.project_name = project.name.clone();
-    profile.project_path = work_dir;
+    profile.project_path = work_dir.clone();
     profile.agent = CcConnectAgent::Codex;
 
     Ok(ResolvedHandoffTarget {
@@ -247,6 +341,9 @@ fn resolve_handoff_target(
         project,
         worktree_id,
         worktree_name,
+        work_dir,
+        transport: CcConnectHandoffTransport::Local,
+        ssh_host_id: None,
     })
 }
 
@@ -280,16 +377,21 @@ fn resolve_record_target(
         platform: record.platform,
         project_id: record.project_id.clone(),
         worktree_id: record.worktree_id.clone(),
-        work_dir: record.work_dir.clone(),
+        work_dir: record
+            .remote_path
+            .clone()
+            .unwrap_or_else(|| record.work_dir.clone()),
         session_title: None,
     };
     let mut target = resolve_handoff_target(base_profile, &request)?;
     if target.project.name != record.project_name
         || target.worktree_name != record.worktree_name
-        || !paths_equal(
-            Path::new(&target.profile.project_path),
-            Path::new(&record.work_dir),
-        )
+        || target.transport != record.transport
+        || target.ssh_host_id != record.ssh_host_id
+        || (record.transport == CcConnectHandoffTransport::Ssh
+            && target.work_dir != record.work_dir)
+        || (record.transport == CcConnectHandoffTransport::Local
+            && !paths_equal(Path::new(&target.work_dir), Path::new(&record.work_dir)))
     {
         return Err("handoff_target_changed".to_string());
     }
@@ -495,7 +597,25 @@ fn manager_process_running(manager: &CcConnectManager) -> Result<bool, String> {
 fn validate_record_session_path(record: &PersistedHandoffRecord) -> Result<PathBuf, String> {
     let root = data_dir()?;
     let recorded = PathBuf::from(&record.session_file_path);
-    let candidates = cc_session_store_candidates(&root, &record.project_name, &record.work_dir)?;
+    let session_work_dir = match record.transport {
+        CcConnectHandoffTransport::Local => record.work_dir.clone(),
+        CcConnectHandoffTransport::Ssh => {
+            let host_id = record
+                .ssh_host_id
+                .as_deref()
+                .ok_or_else(|| "handoff_ssh_host_missing".to_string())?;
+            let remote_path = record
+                .remote_path
+                .as_deref()
+                .unwrap_or(record.work_dir.as_str());
+            user_path_string(&ssh_handoff_work_dir(
+                &record.project_id,
+                host_id,
+                remote_path,
+            )?)
+        }
+    };
+    let candidates = cc_session_store_candidates(&root, &record.project_name, &session_work_dir)?;
     if !path_is_within(&recorded, &root)
         || !candidates
             .iter()
@@ -585,6 +705,61 @@ impl CcConnectManager {
         })
     }
 
+    fn handoff_preflight(&self, request: CcConnectHandoffStartRequest) -> Result<(), String> {
+        let _operation = self
+            .operation
+            .lock()
+            .map_err(|_| "cc-connect operation lock poisoned".to_string())?;
+        self.refresh_process_state();
+        ensure_handoff_inactive()?;
+        if !manager_process_running(self)? {
+            return Err("cc_connect_not_running".to_string());
+        }
+        validate_handoff_identifier(&request.local_session_id, "local_session_id")?;
+        validate_handoff_identifier(&request.cli_session_id, "cli_session_id")?;
+        let base_profile =
+            load_profile()?.ok_or_else(|| "cc-connect profile is not configured".to_string())?;
+        let selected_platform = platform_profile(&base_profile, request.platform)
+            .filter(|item| item.enabled)
+            .ok_or_else(|| "handoff_platform_disabled".to_string())?;
+        let selected_allow_from =
+            normalize_allow_from(selected_platform.platform, &selected_platform.allow_from)
+                .map_err(|_| "handoff_platform_user_missing".to_string())?;
+        if !credentials_ready(request.platform)? {
+            return Err("handoff_credentials_missing".to_string());
+        }
+        let target = resolve_handoff_target(&base_profile, &request)?;
+        let sessions_root = data_dir()?;
+        let source_session_path = cc_session_store_path(
+            &sessions_root,
+            &base_profile.project_name,
+            &base_profile.project_path,
+        )?;
+        let source_document = read_session_document(&source_session_path)?;
+        let platform_session_key =
+            resolve_platform_session_key(&source_document, request.platform, &selected_allow_from)?;
+        if request.platform == CcConnectPlatform::Weixin {
+            load_weixin_context_token(&base_profile, &platform_session_key)?;
+        }
+        let binary = self.detect(base_profile.executable_path.as_deref(), true)?;
+        if !binary.compatible {
+            return Err("cc_connect_version_unsupported".to_string());
+        }
+        if target.transport == CcConnectHandoffTransport::Local {
+            self.check_codex_app_server(true).map_err(|err| {
+                format!("Codex interactive approval backend is unavailable: {err}")
+            })?;
+        }
+        // A second app-server cannot authoritatively inspect a thread still owned by
+        // the desktop Codex process, and resuming it here can interrupt that process.
+        match prepare_remote_codex_launch(&target.profile, &target.project)? {
+            Some(launch) => probe_remote_codex_app_server(&launch)
+                .map_err(|err| format!("handoff_codex_backend_unavailable: {err}")),
+            None if target.transport == CcConnectHandoffTransport::Local => Ok(()),
+            None => Err("handoff_codex_backend_unavailable".to_string()),
+        }
+    }
+
     fn handoff_start(
         &self,
         request: CcConnectHandoffStartRequest,
@@ -663,7 +838,7 @@ impl CcConnectManager {
                 project_name: target.project.name.clone(),
                 worktree_id: target.worktree_id.clone(),
                 worktree_name: target.worktree_name.clone(),
-                work_dir: target.profile.project_path.clone(),
+                work_dir: target.work_dir.clone(),
                 provider_id: target.project.codex_provider_id.clone(),
                 provider_name: provider_display_name(base_profile.language, &target.project),
                 provider_is_global: target.project.provider_is_global,
@@ -676,6 +851,10 @@ impl CcConnectManager {
                 source_project_name: base_profile.project_name.clone(),
                 source_project_path: base_profile.project_path.clone(),
                 started_at_ms: now_millis(),
+                transport: target.transport,
+                ssh_host_id: target.ssh_host_id.clone(),
+                remote_path: (target.transport == CcConnectHandoffTransport::Ssh)
+                    .then(|| target.work_dir.clone()),
             };
             let session_snapshot =
                 FileSnapshot::capture(target_session_path.clone(), "cc-connect handoff session")?;
@@ -888,6 +1067,17 @@ pub async fn cc_connect_handoff_start(
 }
 
 #[tauri::command]
+pub async fn cc_connect_handoff_preflight(
+    manager: State<'_, CcConnectManager>,
+    request: CcConnectHandoffStartRequest,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.handoff_preflight(request))
+        .await
+        .map_err(|err| format!("cc-connect handoff preflight task failed: {err}"))?
+}
+
+#[tauri::command]
 pub async fn cc_connect_handoff_cancel(
     manager: State<'_, CcConnectManager>,
 ) -> Result<CcConnectHandoffStatus, String> {
@@ -934,6 +1124,9 @@ mod tests {
             source_project_name: "CLI-Manager".to_string(),
             source_project_path: r"F:\repo".to_string(),
             started_at_ms: 1,
+            transport: CcConnectHandoffTransport::Local,
+            ssh_host_id: None,
+            remote_path: None,
         };
         let message = format_handoff_notification(&record, true, CcConnectLanguage::Zh);
         assert!(message.contains("thread-1"));

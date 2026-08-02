@@ -2638,7 +2638,7 @@ fn resolve_grok_dir(
             fs::create_dir_all(&dir).map_err(|e| format!("创建 Grok 配置目录失败: {e}"))?;
             return Ok(Some(dir));
         }
-        return Err("选择的 Grok 配置目录不存在".to_string());
+        return Ok(None);
     }
 
     let Some(home) = home_dir() else {
@@ -3066,7 +3066,7 @@ fn resolve_pi_dir(
             fs::create_dir_all(&dir).map_err(|e| format!("创建 Pi 配置目录失败: {e}"))?;
             return Ok(Some(dir));
         }
-        return Err("选择的 Pi 配置目录不存在".to_string());
+        return Ok(None);
     }
 
     let Some(home_dir) = home_dir() else {
@@ -3374,7 +3374,11 @@ fn resolve_claude_dir(
 ) -> Result<Option<PathBuf>, String> {
     if let Some(dir) = selected_dir.and_then(|value| normalize_selected_dir(&value)) {
         if !dir.is_dir() {
-            return Err("选择的 Claude 配置目录不存在".to_string());
+            return if require_existing {
+                Err("选择的 Claude 配置目录不存在".to_string())
+            } else {
+                Ok(None)
+            };
         }
         return Ok(Some(dir));
     }
@@ -3404,7 +3408,7 @@ fn resolve_codex_dir(
             fs::create_dir_all(&dir).map_err(|e| format!("创建 Codex 配置目录失败: {e}"))?;
             return Ok(Some(dir));
         }
-        return Err("选择的 Codex 配置目录不存在".to_string());
+        return Ok(None);
     }
 
     let Some(home_dir) = home_dir() else {
@@ -4117,15 +4121,46 @@ mod tests {
         fs::write(config_path, config).unwrap();
     }
 
-    #[tokio::test]
-    async fn install_codex_rejects_missing_selected_dir_without_creating_it() {
+    #[test]
+    fn optional_config_resolution_ignores_missing_selected_dirs() {
         let tmp = TempDir::new().unwrap();
+        let missing_claude_dir = tmp.path().join("missing-claude");
         let missing_codex_dir = tmp.path().join("missing-codex");
+        let missing_pi_dir = tmp.path().join("missing-pi");
+        let missing_grok_dir = tmp.path().join("missing-grok");
 
-        let err = resolve_codex_dir(Some(path_to_string(&missing_codex_dir)), false).unwrap_err();
+        assert_eq!(
+            resolve_claude_dir(Some(path_to_string(&missing_claude_dir)), false).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_codex_dir(Some(path_to_string(&missing_codex_dir)), false).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_pi_dir(Some(path_to_string(&missing_pi_dir)), false).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_grok_dir(Some(path_to_string(&missing_grok_dir)), false).unwrap(),
+            None
+        );
 
-        assert_eq!(err, "选择的 Codex 配置目录不存在");
+        assert!(!missing_claude_dir.exists());
         assert!(!missing_codex_dir.exists());
+        assert!(!missing_pi_dir.exists());
+        assert!(!missing_grok_dir.exists());
+    }
+
+    #[test]
+    fn required_claude_resolution_rejects_missing_selected_dir() {
+        let tmp = TempDir::new().unwrap();
+        let missing_claude_dir = tmp.path().join("missing-claude");
+
+        let err = resolve_claude_dir(Some(path_to_string(&missing_claude_dir)), true).unwrap_err();
+
+        assert_eq!(err, "选择的 Claude 配置目录不存在");
+        assert!(!missing_claude_dir.exists());
     }
 
     #[tokio::test]

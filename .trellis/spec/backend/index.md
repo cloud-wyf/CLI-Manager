@@ -9,7 +9,7 @@
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [WebDAV Sync Contracts](./webdav-sync-contracts.md) | WebDAV sync request/response boundaries, size checks, and validation cases | Active |
-| [Terminal Runtime Monitoring Contracts](./terminal-runtime-monitoring-contracts.md) | PTY env keys, shell OSC marker format, and tab runtime status mapping | Active |
+| [Terminal Runtime Monitoring Contracts](./terminal-runtime-monitoring-contracts.md) | PTY env keys, shell OSC markers, tab runtime status, and resource growth diagnostics | Active |
 | [Terminal OSC Color Contracts](./terminal-osc-color-contracts.md) | OSC 10/11 ownership, daemon color frames, local/WSL replies, and SSH filtering | Active |
 | [Tauri Updater Contracts](./tauri-updater-contracts.md) | Signed updater config, capabilities, release artifacts, and install/relaunch UX contracts | Active |
 | [cc-switch Integration Contracts](./ccswitch-integration-contracts.md) | External SQLite read-only access (sqlx, no rusqlite), secret masking, and per-project settings.json env replacement | Active |
