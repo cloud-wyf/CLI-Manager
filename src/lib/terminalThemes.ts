@@ -104,7 +104,8 @@ export type LightTerminalPalette =
   | "apple-pure"
   | "apple-mist"
   | "apple-warm"
-  | "apple-mono";
+  | "apple-mono"
+  | "claude-light";
 export type DarkTerminalPalette =
   | "night-indigo"
   | "forest-night"
@@ -1401,6 +1402,32 @@ const windowsTerminalVintage: ITheme = {
   brightWhite: "#FFFFFF",
 };
 
+// Claude Light — 色相取自 claude-style 的 Claude Light 规范（背景/前景/强调/选中为规范原值）。
+// ANSI 色需满足浅色主题强制的 minimumContrastRatio 6，故按规范色相压深：
+// normal 目标 6.2:1，bright 目标 9.0:1 —— 两档分开才能让 bright 与 normal 视觉可分。
+const claudeLight: ITheme = {
+  background: "#faf9f5",
+  foreground: "#3c2f23",
+  cursor: "#96462b",
+  selectionBackground: "#e8ddd0",
+  black: "#3c2f23",
+  red: "#96462b",
+  green: "#326936",
+  yellow: "#795807",
+  blue: "#145ea7",
+  magenta: "#794f7a",
+  cyan: "#00686d",
+  white: "#645c53",
+  brightBlack: "#4a453e",
+  brightRed: "#713420",
+  brightGreen: "#254e28",
+  brightYellow: "#5a4105",
+  brightBlue: "#0f477c",
+  brightMagenta: "#5a3b5b",
+  brightCyan: "#004e52",
+  brightWhite: "#3c2f23",
+};
+
 export const TERMINAL_THEME_PRESETS: TerminalThemePreset[] = [
   { id: "windowsTerminalCampbell", name: "Windows Terminal Campbell", theme: windowsTerminalCampbell, group: "high-contrast", family: "windows-terminal", tone: "dark" },
   { id: "windowsTerminalCampbellPowershell", name: "Windows Terminal Campbell PowerShell", theme: windowsTerminalCampbellPowershell, group: "cool", family: "windows-terminal", tone: "dark" },
@@ -1443,6 +1470,7 @@ export const TERMINAL_THEME_PRESETS: TerminalThemePreset[] = [
   { id: "rosePineMoon", name: "Rosé Pine Moon", theme: rosePineMoon, group: "pink-purple", family: "rose-pine", tone: "dark" },
   { id: "rosePineDawn", name: "Rosé Pine Dawn", theme: rosePineDawn, group: "pink-purple", family: "rose-pine", tone: "light" },
   { id: "dawnfox", name: "Dawnfox", theme: dawnfox, group: "light-office", family: "nightfox", tone: "light" },
+  { id: "claudeLight", name: "Claude Light", theme: claudeLight, group: "light-office", family: "claude", tone: "light" },
   { id: "kanagawaWave", name: "Kanagawa Wave", theme: kanagawaWave, group: "warm", family: "kanagawa", tone: "dark" },
   { id: "kanagawaDragon", name: "Kanagawa Dragon", theme: kanagawaDragon, group: "nature", family: "kanagawa", tone: "dark" },
   { id: "ayuDark", name: "Ayu Dark", theme: ayuDark, group: "warm", family: "ayu", tone: "dark" },
@@ -1473,6 +1501,7 @@ function resolveAutoLightThemeId(lightPalette: LightTerminalPalette = "warm-pape
   if (lightPalette === "apple-mist") return "githubLight";
   if (lightPalette === "apple-warm") return "warmPaperLight";
   if (lightPalette === "apple-mono") return "githubLight";
+  if (lightPalette === "claude-light") return "claudeLight";
   return "warmPaperLight";
 }
 

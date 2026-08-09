@@ -17,6 +17,7 @@ const LIGHT_PRIMARY_COLORS: Record<LightThemePalette, string> = {
   "apple-mist": "#0a84ff",
   "apple-warm": "#ff9f0a",
   "apple-mono": "#3a3a3c",
+  "claude-light": "#c96442",
 };
 
 const DARK_PRIMARY_COLORS: Record<DarkThemePalette, string> = {

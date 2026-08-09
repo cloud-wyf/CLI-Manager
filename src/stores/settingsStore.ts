@@ -57,7 +57,8 @@ export type LightThemePalette =
   | "apple-pure"
   | "apple-mist"
   | "apple-warm"
-  | "apple-mono";
+  | "apple-mono"
+  | "claude-light";
 export type DarkThemePalette =
   | "night-indigo"
   | "forest-night"

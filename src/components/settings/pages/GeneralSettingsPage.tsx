@@ -108,6 +108,12 @@ const LIGHT_PALETTE_OPTIONS: {
     descriptionKey: "settings.palette.light.appleMono.description",
     swatches: ["#ffffff", "#1d1d1f", "#3a3a3c"],
   },
+  {
+    value: "claude-light",
+    labelKey: "settings.palette.light.claudeLight.label",
+    descriptionKey: "settings.palette.light.claudeLight.description",
+    swatches: ["#faf9f5", "#3c2f23", "#c96442"],
+  },
 ];
 
 const DARK_PALETTE_OPTIONS: {
@@ -189,6 +195,7 @@ const LIGHT_TEXT_COLORS: Record<LightThemePalette, string> = {
   "apple-mist": "#1c1f23",
   "apple-warm": "#1f1d1a",
   "apple-mono": "#0f0f10",
+  "claude-light": "#3c2f23",
 };
 
 const DARK_TEXT_COLORS: Record<DarkThemePalette, string> = {
@@ -224,6 +231,7 @@ const LIGHT_BG_COLORS: Record<LightThemePalette, string> = {
   "apple-mist": "#fcfcfd",
   "apple-warm": "#fdfcf9",
   "apple-mono": "#ffffff",
+  "claude-light": "#faf9f5",
 };
 
 const DARK_BG_COLORS: Record<DarkThemePalette, string> = {

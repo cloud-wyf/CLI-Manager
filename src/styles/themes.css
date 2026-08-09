@@ -293,6 +293,22 @@
   --warning: #b6791d;
 }
 
+/* Light theme - Claude Light (暖纸基底 + Claude 赭橙，对齐 claude-style 规范) */
+[data-theme="light"][data-light-palette="claude-light"] {
+  --bg-primary: #faf9f5;
+  --bg-secondary: #f5f4ed;
+  --bg-tertiary: #ece7dc;
+  --text-primary: #3c2f23;
+  --text-secondary: #5c5044;
+  --text-muted: #847a6d;
+  --accent: #c96442;
+  --accent-hover: #d67555;
+  --border: #d8cfc0;
+  --danger: #b3392b;
+  --success: #3c7f41;
+  --warning: #926b09;
+}
+
 /* Digital Atelier semantic tokens (compat layer on top of existing vars) */
 :root,
 [data-theme="dark"],
@@ -440,6 +456,23 @@
   --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 70%, var(--primary) 30%);
   --interactive-selected-border: color-mix(in srgb, var(--primary) 55%, var(--border) 45%);
   --interactive-shadow: none;
+}
+
+/* Claude Light：纸质暖白，hover/选中态用 claude-style 规范的 accent 8% 与 #e8ddd0 */
+[data-theme="light"][data-light-palette="claude-light"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #faf9f5;
+  --surface-container-high: #f5f4ed;
+  --surface-container-highest: #ece7dc;
+  --primary-dim: color-mix(in srgb, var(--primary) 72%, #faf9f5 28%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 82%, #ffffff 18%);
+  --primary-gradient-end: color-mix(in srgb, var(--primary) 64%, #8b4a2e 36%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 24%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 92%, var(--primary) 8%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 86%, var(--primary) 14%);
+  --interactive-selected-bg: #e8ddd0;
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 58%, var(--border) 42%);
+  --interactive-shadow: 0 6px 16px color-mix(in srgb, #3c2f23 8%, transparent);
 }
 
 [data-theme="light"] {
