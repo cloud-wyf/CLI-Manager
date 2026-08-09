@@ -39,7 +39,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } f
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { toast } from "sonner";
-import { logError, logInfo } from "../../lib/logger";
+import { logError } from "../../lib/logger";
 import { SidebarHeader, type ProjectListFilter } from "./SidebarHeader";
 import { ProjectTree } from "./ProjectTree";
 import { BatchShellDialog } from "./BatchShellDialog";
@@ -520,11 +520,6 @@ export function Sidebar({
 
   const handleResumeHistorySession = useCallback(
     (project: Project, session: HistorySessionSummary) => {
-      logInfo("sidebar history row clicked", {
-        projectId: project.id,
-        sessionId: session.session_id,
-        source: session.source,
-      });
       requestResume(session, session.title.trim() || session.session_id, project.id);
     },
     [requestResume]

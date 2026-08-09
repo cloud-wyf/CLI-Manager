@@ -8,7 +8,7 @@ import type {
   WorktreeRecord,
 } from "../../lib/types";
 import { useI18n } from "../../lib/i18n";
-import { logError, logInfo } from "../../lib/logger";
+import { logError } from "../../lib/logger";
 import {
   findLocalHistoryCwdProjects,
   matchesHistoryProjectSource,
@@ -215,13 +215,6 @@ export function useHistoryResume(): HistoryResume {
     try {
       const requestedShell = launchProject ? launchProject.shell : unscopedShell;
       const shell = requestedShell && requestedShell !== "powershell" ? requestedShell : undefined;
-      logInfo("history resume: creating terminal", {
-        projectId: project?.id ?? null,
-        cwd,
-        command,
-        shell: shell ?? null,
-        worktreeId: worktree?.id ?? null,
-      });
       await createSession(
         project?.id,
         cwd,
@@ -304,18 +297,6 @@ export function useHistoryResume(): HistoryResume {
     );
     const cwdProjects = findLocalHistoryCwdProjects(session, historyProjects);
     const candidates = selection.candidates;
-
-    logInfo("history resume requested", {
-      source: session.source,
-      sessionId: session.session_id,
-      cwd: session.cwd ?? null,
-      projectKey: session.project_key,
-      projectIdHint: projectIdHint ?? projectIdFilter,
-      matchedProjectId: selection.project?.id ?? null,
-      candidateCount: candidates.length,
-      cwdProjectCount: cwdProjects.length,
-      historyProjectCount: historyProjects.length,
-    });
 
     if (selection.project) {
       startResume(session, title, selection.project, selection.worktree);
