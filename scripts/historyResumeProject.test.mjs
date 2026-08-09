@@ -13,8 +13,8 @@ const source = readFileSync(
   new URL("../src/lib/historyResumeProject.ts", import.meta.url),
   "utf8"
 );
-const historyWorkspaceSource = readFileSync(
-  new URL("../src/components/HistoryWorkspace.tsx", import.meta.url),
+const historyResumeSource = readFileSync(
+  new URL("../src/components/history/useHistoryResume.tsx", import.meta.url),
   "utf8"
 );
 writeFileSync(
@@ -138,22 +138,22 @@ test("exact worktree project has priority over duplicate cwd candidates", () => 
 });
 
 test("local history resume binds the terminal tab to the selected CLI session", () => {
-  const resumeSessionStart = historyWorkspaceSource.indexOf(
+  const resumeSessionStart = historyResumeSource.indexOf(
     "  const resumeSession = useCallback(async ("
   );
-  const requestResumeStart = historyWorkspaceSource.indexOf(
+  const requestResumeStart = historyResumeSource.indexOf(
     "  const requestResume = useCallback(",
     resumeSessionStart
   );
 
   assert.notEqual(resumeSessionStart, -1);
   assert.notEqual(requestResumeStart, -1);
-  const localResumeStart = historyWorkspaceSource.indexOf(
+  const localResumeStart = historyResumeSource.indexOf(
     "      const requestedShell =",
     resumeSessionStart
   );
   assert.notEqual(localResumeStart, -1);
-  const localResumeBody = historyWorkspaceSource.slice(
+  const localResumeBody = historyResumeSource.slice(
     localResumeStart,
     requestResumeStart
   );

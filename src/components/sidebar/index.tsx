@@ -16,7 +16,7 @@ import {
 } from "../../stores/worktreeStore";
 import { useExternalSessionSyncStore } from "../../stores/externalSessionSyncStore";
 import type { TerminalPaneSplitDirection } from "../../stores/terminalPaneTree";
-import type { HistorySourceFilter, Project, TreeNode as TNode, Group, TerminalScope, TerminalSession, WorktreeRecord } from "../../lib/types";
+import type { HistorySessionSummary, HistorySourceFilter, Project, TreeNode as TNode, Group, TerminalScope, TerminalSession, WorktreeRecord } from "../../lib/types";
 import { ConfigModal } from "../ConfigModal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { useAppConfirm } from "../ui/useAppConfirm";
@@ -32,12 +32,14 @@ import { projectWithWorktreePath, projectWithWorktreeProviderOverrides } from ".
 import { ALL_TERMINALS_SCOPE, collectProjectIdsForGroup, sessionMatchesTerminalScope } from "../../lib/terminalScope";
 import { projectSupportsCapability, type ProjectCapability } from "../../lib/projectCapabilities";
 import { TreeContext, worktreeListCollapseId, type TreeActions } from "./TreeContext";
+import { useProjectHistorySessions } from "./useProjectHistorySessions";
+import { useHistoryResume } from "../history/useHistoryResume";
 import { Portal } from "../ui/Portal";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { toast } from "sonner";
-import { logError } from "../../lib/logger";
+import { logError, logInfo } from "../../lib/logger";
 import { SidebarHeader, type ProjectListFilter } from "./SidebarHeader";
 import { ProjectTree } from "./ProjectTree";
 import { BatchShellDialog } from "./BatchShellDialog";
@@ -502,6 +504,31 @@ export function Sidebar({
     return ids;
   }, [displayedTree, collapsedIds]);
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+  const projectIdSet = useMemo(() => new Set(projects.map((project) => project.id)), [projects]);
+  const projectHistory = useProjectHistorySessions(projectIdSet);
+  const { requestResume, resumeDialog } = useHistoryResume();
+
+  // SSH 历史需要由 openHistory 建立的远端 Agent 桥接，紧凑视图下又没有终端区承载 resume 出来的会话，
+  // 这两种情况保持原样：点击行为不变，仍走右键「会话历史」。
+  const canExpandProjectHistory = useCallback(
+    (project: Project) =>
+      !compactMode
+      && project.environment_type !== "ssh"
+      && projectSupportsCapability(project, "history"),
+    [compactMode]
+  );
+
+  const handleResumeHistorySession = useCallback(
+    (project: Project, session: HistorySessionSummary) => {
+      logInfo("sidebar history row clicked", {
+        projectId: project.id,
+        sessionId: session.session_id,
+        source: session.source,
+      });
+      requestResume(session, session.title.trim() || session.session_id, project.id);
+    },
+    [requestResume]
+  );
 
   const activateFirstProjectSession = useCallback(
     (projectId: string): boolean => {
@@ -1447,10 +1474,14 @@ export function Sidebar({
     setSelectedProjectIds(new Set([project.id]));
     setSelectedGroupIds((prev) => (prev.size === 0 ? prev : new Set()));
     selectionAnchorRef.current = project.id;
+    // 双击（开终端）会连发两次 click，只让第一次切换展开态，避免展开又立刻收起。
+    if (e.detail <= 1 && canExpandProjectHistory(project)) {
+      projectHistory.toggle(project);
+    }
     if (activateFirstProjectSession(project.id)) {
       closeHistory();
     }
-  }, [activateFirstProjectSession, closeHistory, onTerminalScopeChange, projectScopedTerminalViewEnabled, selectedProjectIds, visibleProjectIds]);
+  }, [activateFirstProjectSession, canExpandProjectHistory, closeHistory, onTerminalScopeChange, projectHistory, projectScopedTerminalViewEnabled, selectedProjectIds, visibleProjectIds]);
 
   const handleSelectProjectByKeyboard = useCallback((project: Project) => {
     setSelectedId(project.id);
@@ -1776,6 +1807,12 @@ export function Sidebar({
       renamingGroupId,
       renamingProjectId,
       providerBadges,
+      expandedHistoryProjectIds: projectHistory.expandedIds,
+      historyByProject: projectHistory.byProject,
+      canExpandProjectHistory,
+      onReloadProjectHistory: projectHistory.reload,
+      onLoadMoreProjectHistory: projectHistory.loadMore,
+      onResumeHistorySession: handleResumeHistorySession,
       onSelectProject: handleSelectProject,
       onSelectProjectByKeyboard: handleSelectProjectByKeyboard,
       onSelectGroup: handleSelectGroup,
@@ -1813,6 +1850,9 @@ export function Sidebar({
       renamingGroupId,
       renamingProjectId,
       providerBadges,
+      projectHistory,
+      canExpandProjectHistory,
+      handleResumeHistorySession,
       handleSelectProject,
       handleSelectProjectByKeyboard,
       handleSelectGroup,
@@ -2022,6 +2062,7 @@ export function Sidebar({
       style={{ width: compactMode ? "100%" : sidebarWidth }}
     >
       {appConfirmDialog}
+      {resumeDialog}
       <div className="ui-sidebar-top">
         <SidebarHeader
           collapsed={compactMode ? false : sidebarCollapsed}

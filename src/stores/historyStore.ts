@@ -308,7 +308,8 @@ function normalizeSessionRef(raw: unknown): HistorySessionRef | null {
   };
 }
 
-function normalizeSummary(raw: unknown): HistorySessionSummary {
+/** 后端摘要行的唯一归一化入口：同时兼容 snake_case 与 camelCase 两种序列化键名。 */
+export function normalizeSummary(raw: unknown): HistorySessionSummary {
   const rec = (raw ?? {}) as Record<string, unknown>;
   const remoteIdentityRaw = rec.remote_identity ?? rec.remoteIdentity;
   return {

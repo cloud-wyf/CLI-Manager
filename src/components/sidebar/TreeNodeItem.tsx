@@ -2,16 +2,17 @@ import { useState, useEffect, useRef, memo, type PointerEvent as ReactPointerEve
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { TreeNode as TNode } from "../../lib/types";
+import type { Project, TreeNode as TNode } from "../../lib/types";
 import type { ProviderBadge } from "../../stores/projectStore";
-import { useTreeActions, worktreeListCollapseId } from "./TreeContext";
-import { Folder, Terminal, Play, ChevronRight, AlertTriangle } from "../icons";
+import { historySessionTreeKey, useTreeActions, worktreeListCollapseId, type TreeActions } from "./TreeContext";
+import { Folder, Terminal, Play, ChevronRight, AlertTriangle, ListClockIcon } from "../icons";
 import { VendorIcon, inferVendor } from "../VendorIcon";
 import { WorktreeIcon } from "../WorktreeIcon";
 import { useI18n } from "../../lib/i18n";
 import { DND_SORTABLE_TRANSITION } from "../../lib/dragInteraction";
 import { CliToolIcon } from "../CliToolIcon";
-import { resolveCliToolIconKey } from "../../lib/cliTools";
+import { resolveCliToolIconKey, resolveHistorySourceIconKey } from "../../lib/cliTools";
+import { formatTime } from "../history/historyViewUtils";
 
 function preventSecondaryPointerFocus(event: ReactPointerEvent<HTMLElement>) {
   if (event.button !== 2) return;
@@ -80,6 +81,104 @@ function InlineRename({ initial, onConfirm, onCancel }: { initial: string; onCon
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
     />
+  );
+}
+
+interface ProjectHistoryChildrenProps {
+  project: Project;
+  actions: TreeActions;
+  depth: number;
+  compact: boolean;
+  paddingLeft: number;
+  focusedNodeKey: string | null;
+  onFocusNode: (key: string) => void;
+}
+
+function ProjectHistoryChildren({
+  project,
+  actions,
+  depth,
+  compact,
+  paddingLeft,
+  focusedNodeKey,
+  onFocusNode,
+}: ProjectHistoryChildrenProps) {
+  const { t, language } = useI18n();
+  const state = actions.historyByProject[project.id];
+  const rowStyle = { paddingLeft, paddingRight: compact ? 8 : 10 };
+  const rowClass = `ui-tree-node ui-history-row ui-focus-ring flex items-center rounded-xl ${
+    compact ? "gap-1.5 py-1 text-[12px]" : "gap-2 py-1 text-[12px]"
+  }`;
+
+  if (!state || state.status === "loading") {
+    return <div className="ui-history-hint" style={rowStyle}>{t("sidebar.history.loading")}</div>;
+  }
+
+  if (state.status === "error") {
+    return (
+      <button
+        type="button"
+        className={`${rowClass} w-full`}
+        style={rowStyle}
+        onClick={() => actions.onReloadProjectHistory(project)}
+      >
+        <span className="min-w-0 flex-1 truncate text-left text-danger">{t("sidebar.history.loadFailed")}</span>
+        <span className="shrink-0 text-primary">{t("sidebar.history.retry")}</span>
+      </button>
+    );
+  }
+
+  if (state.sessions.length === 0) {
+    return <div className="ui-history-hint" style={rowStyle}>{t("sidebar.history.empty")}</div>;
+  }
+
+  return (
+    <>
+      {state.sessions.map((session) => {
+        const treeKey = historySessionTreeKey(project.id, session);
+        const title = session.title.trim() || session.session_id;
+        const time = formatTime(session.updated_at, language);
+        const iconKey = resolveHistorySourceIconKey(session.source);
+        return (
+          <div
+            key={treeKey}
+            role="treeitem"
+            data-tree-key={treeKey}
+            aria-level={depth + 2}
+            aria-selected={false}
+            tabIndex={focusedNodeKey === treeKey ? 0 : -1}
+            onFocus={() => onFocusNode(treeKey)}
+          >
+            <div
+              className={`${rowClass} cursor-pointer`}
+              style={rowStyle}
+              title={`${title}\n${time}`}
+              aria-label={t("sidebar.history.sessionAria", { title })}
+              onClick={() => actions.onResumeHistorySession(project, session)}
+            >
+              <span className="ui-tree-leading-icon">
+                {iconKey ? <CliToolIcon icon={iconKey} size={12} /> : <ListClockIcon size={12} />}
+              </span>
+              <span className="min-w-0 flex-1 truncate">{title}</span>
+              <span className="ui-history-time shrink-0 text-[10px] leading-none">{time}</span>
+            </div>
+          </div>
+        );
+      })}
+      {state.hasMore && (
+        <button
+          type="button"
+          className={`${rowClass} w-full text-primary`}
+          style={rowStyle}
+          disabled={state.loadingMore}
+          onClick={() => actions.onLoadMoreProjectHistory(project)}
+        >
+          <span className="truncate">
+            {state.loadingMore ? t("sidebar.history.loading") : t("sidebar.history.loadMore")}
+          </span>
+        </button>
+      )}
+    </>
   );
 }
 
@@ -218,6 +317,8 @@ function TreeNodeItemImpl({
     const providerBadge = actions.providerBadges[p.id];
     const worktreeCollapseKey = worktreeListCollapseId(p.id);
     const worktreesOpen = forceExpanded || !actions.collapsedIds.has(worktreeCollapseKey);
+    // 搜索态强制展开只作用于 worktree；历史跟着展开会一次点燃 N 个 history_list_sessions。
+    const historyOpen = !forceExpanded && actions.expandedHistoryProjectIds.has(p.id);
 
     if (actions.renamingProjectId === p.id) {
       return (
@@ -374,6 +475,23 @@ function TreeNodeItemImpl({
                 sortableEnabled={false}
               />
             ))}
+          </div>
+        )}
+        {historyOpen && (
+          <div
+            className="ui-history-children space-y-0.5"
+            role="group"
+            aria-label={t("sidebar.history.groupAria", { name: p.name })}
+          >
+            <ProjectHistoryChildren
+              project={p}
+              actions={actions}
+              depth={depth}
+              compact={compact}
+              paddingLeft={paddingLeft + indentStep}
+              focusedNodeKey={focusedNodeKey}
+              onFocusNode={onFocusNode}
+            />
           </div>
         )}
       </div>

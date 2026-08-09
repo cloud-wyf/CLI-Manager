@@ -1,8 +1,9 @@
 import { createContext, useContext, type MouseEvent as ReactMouseEvent } from "react";
 import type { DragEndEvent } from "@dnd-kit/core";
-import type { Project, TerminalScope, WorktreeRecord } from "../../lib/types";
+import type { HistorySessionSummary, Project, TerminalScope, WorktreeRecord } from "../../lib/types";
 import type { ProviderBadge } from "../../stores/projectStore";
 import type { SessionStatus } from "../../stores/terminalStore";
+import type { ProjectHistoryState } from "./useProjectHistorySessions";
 
 export interface TreeActions {
   selectedId: string | null;
@@ -16,6 +17,12 @@ export interface TreeActions {
   renamingGroupId: string | null;
   renamingProjectId: string | null;
   providerBadges: Record<string, ProviderBadge>;
+  expandedHistoryProjectIds: Set<string>;
+  historyByProject: Record<string, ProjectHistoryState>;
+  canExpandProjectHistory: (p: Project) => boolean;
+  onReloadProjectHistory: (p: Project) => void;
+  onLoadMoreProjectHistory: (p: Project) => void;
+  onResumeHistorySession: (p: Project, session: HistorySessionSummary) => void;
   onSelectProject: (e: ReactMouseEvent, p: Project) => void;
   onSelectProjectByKeyboard: (p: Project) => void;
   onSelectGroup: (e: ReactMouseEvent, groupId: string, forceExpanded: boolean) => void;
@@ -46,6 +53,10 @@ export const TreeContext = createContext<TreeActions | null>(null);
 
 export function worktreeListCollapseId(projectId: string): string {
   return `project-worktrees:${projectId}`;
+}
+
+export function historySessionTreeKey(projectId: string, session: HistorySessionSummary): string {
+  return `h:${projectId}:${session.source}:${session.session_id}`;
 }
 
 export function useTreeActions(): TreeActions {

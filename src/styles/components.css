@@ -2264,6 +2264,43 @@
   color: var(--success);
 }
 
+/* 项目行内联展开的历史会话：结构照抄 worktree 子列表，竖线换成主色以示区分 */
+.ui-history-children {
+  position: relative;
+  margin-left: 12px;
+  padding-left: 6px;
+}
+
+.ui-history-children::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 6px;
+  left: 6px;
+  width: 1px;
+  border-radius: 999px;
+  background-color: color-mix(in srgb, var(--primary) 26%, transparent);
+}
+
+[data-theme="light"] .ui-history-children::before {
+  background-color: color-mix(in srgb, var(--border) 42%, transparent);
+}
+
+.ui-history-row {
+  color: var(--on-surface-variant);
+}
+
+.ui-history-time {
+  color: var(--text-muted);
+}
+
+.ui-history-hint {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .ui-worktree-short-chip,
 .ui-worktree-tab-badge {
   border: 1px solid color-mix(in srgb, var(--success) 38%, transparent);

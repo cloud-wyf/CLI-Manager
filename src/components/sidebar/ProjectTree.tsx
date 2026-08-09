@@ -1,7 +1,7 @@
 import { DndContext, DragOverlay, PointerSensor, closestCenter, useSensor, useSensors, type CollisionDetection, type DragStartEvent } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import type { Project, TerminalScope, TreeNode as TNode } from "../../lib/types";
+import type { HistorySessionSummary, Project, TerminalScope, TreeNode as TNode } from "../../lib/types";
 import type { SessionStatus } from "../../stores/terminalStore";
 import { SidebarSkeleton } from "../ui/Skeleton";
 import { EmptyState } from "../ui/EmptyState";
@@ -10,7 +10,7 @@ import { Folder, Plus, Terminal } from "../icons";
 import { VendorIcon, inferVendor } from "../VendorIcon";
 import { WorktreeIcon } from "../WorktreeIcon";
 import { TreeNodeItem } from "./TreeNodeItem";
-import { useTreeActions, worktreeListCollapseId, type TreeActions } from "./TreeContext";
+import { historySessionTreeKey, useTreeActions, worktreeListCollapseId, type TreeActions } from "./TreeContext";
 import { useI18n } from "../../lib/i18n";
 import { DND_ACTIVATION_CONSTRAINT } from "../../lib/dragInteraction";
 
@@ -41,6 +41,9 @@ const STATUS_COLORS: Record<SessionStatus, string> = {
   error: "#f7768e",
 };
 
+// 搜索态下强制展开用的空集合；每次 render 新建会击穿 visibleNodes 的 memo。
+const EMPTY_KEY_SET: Set<string> = new Set();
+
 function countProjects(node: TNode): number {
   if (node.type === "project") return 1;
   if (node.type === "worktree") return 0;
@@ -49,12 +52,13 @@ function countProjects(node: TNode): number {
 
 interface VisibleTreeNode {
   key: string;
-  kind: "all-terminals" | "group" | "project" | "worktree";
+  kind: "all-terminals" | "group" | "project" | "worktree" | "history";
   parentGroupKey: string | null;
   groupId?: string;
   groupName?: string;
   projectId?: string;
   worktreeId?: string;
+  historySession?: HistorySessionSummary;
   isOpen?: boolean;
   hasChildren?: boolean;
   firstChildKey?: string | null;
@@ -180,6 +184,8 @@ const treeCollisionDetection: CollisionDetection = (args) => {
 function flattenVisibleTree(
   nodes: TNode[],
   collapsedIds: Set<string>,
+  expandedHistoryProjectIds: Set<string>,
+  historyByProject: TreeActions["historyByProject"],
   parentGroupKey: string | null = null,
   out: VisibleTreeNode[] = []
 ): VisibleTreeNode[] {
@@ -199,7 +205,7 @@ function flattenVisibleTree(
         firstChildKey,
       });
       if (isOpen) {
-        flattenVisibleTree(node.children, collapsedIds, currentKey, out);
+        flattenVisibleTree(node.children, collapsedIds, expandedHistoryProjectIds, historyByProject, currentKey, out);
       }
       continue;
     }
@@ -215,11 +221,15 @@ function flattenVisibleTree(
       continue;
     }
 
+    const projectKey = `p:${node.project.id}`;
     const projectWorktrees = node.worktrees ?? [];
     const isOpen = !collapsedIds.has(worktreeListCollapseId(node.project.id));
     const firstChildKey = projectWorktrees.length > 0 ? `wt:${projectWorktrees[0].id}` : null;
+    const historySessions = expandedHistoryProjectIds.has(node.project.id)
+      ? historyByProject[node.project.id]?.sessions ?? []
+      : [];
     out.push({
-      key: `p:${node.project.id}`,
+      key: projectKey,
       kind: "project",
       parentGroupKey,
       projectId: node.project.id,
@@ -227,14 +237,25 @@ function flattenVisibleTree(
       hasChildren: projectWorktrees.length > 0,
       firstChildKey,
     });
-    if (!isOpen) continue;
-    for (const worktree of projectWorktrees) {
+    if (isOpen) {
+      for (const worktree of projectWorktrees) {
+        out.push({
+          key: `wt:${worktree.id}`,
+          kind: "worktree",
+          parentGroupKey: projectKey,
+          projectId: node.project.id,
+          worktreeId: worktree.id,
+        });
+      }
+    }
+    // 历史子列表与 worktree 折叠态互不影响，顺序与 TreeNodeItem 的渲染顺序保持一致。
+    for (const session of historySessions) {
       out.push({
-        key: `wt:${worktree.id}`,
-        kind: "worktree",
-        parentGroupKey: `p:${node.project.id}`,
+        key: historySessionTreeKey(node.project.id, session),
+        kind: "history",
+        parentGroupKey: projectKey,
         projectId: node.project.id,
-        worktreeId: worktree.id,
+        historySession: session,
       });
     }
   }
@@ -278,12 +299,18 @@ export function ProjectTree({
   );
   const visibleNodes = useMemo(
     () => {
-      const nodes = flattenVisibleTree(filteredTree, searchActive ? new Set<string>() : actions.collapsedIds);
+      const nodes = flattenVisibleTree(
+        filteredTree,
+        searchActive ? EMPTY_KEY_SET : actions.collapsedIds,
+        // 搜索态下 TreeNodeItem 不渲染历史子块，扁平序列必须跟着一起收起。
+        searchActive ? EMPTY_KEY_SET : actions.expandedHistoryProjectIds,
+        actions.historyByProject,
+      );
       return projectScopedTerminalViewEnabled
         ? [{ key: "scope:all", kind: "all-terminals", parentGroupKey: null } satisfies VisibleTreeNode, ...nodes]
         : nodes;
     },
-    [actions.collapsedIds, filteredTree, projectScopedTerminalViewEnabled, searchActive]
+    [actions.collapsedIds, actions.expandedHistoryProjectIds, actions.historyByProject, filteredTree, projectScopedTerminalViewEnabled, searchActive]
   );
   const visibleNodeIndex = useMemo(() => {
     const map = new Map<string, number>();
@@ -515,6 +542,10 @@ export function ProjectTree({
         const item = worktreeById.get(current.worktreeId);
         if (item) actions.onOpenWorktree(item.project, item.worktree);
       }
+      if (current.kind === "history" && current.projectId && current.historySession) {
+        const projectNode = projectById.get(current.projectId);
+        if (projectNode) actions.onResumeHistorySession(projectNode.project, current.historySession);
+      }
       return;
     }
 
@@ -549,6 +580,10 @@ export function ProjectTree({
       if (current.kind === "worktree" && current.worktreeId) {
         const item = worktreeById.get(current.worktreeId);
         if (item) actions.onOpenWorktree(item.project, item.worktree);
+      }
+      if (current.kind === "history" && current.projectId && current.historySession) {
+        const projectNode = projectById.get(current.projectId);
+        if (projectNode) actions.onResumeHistorySession(projectNode.project, current.historySession);
       }
       if (current.kind === "group" && current.groupId && !forceExpanded) {
         actions.toggleCollapsed(current.groupId);

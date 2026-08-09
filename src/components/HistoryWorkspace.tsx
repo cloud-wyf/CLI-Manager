@@ -3,26 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useHistoryStore } from "../stores/historyStore";
 import { useTerminalStore } from "../stores/terminalStore";
-import type { HistoryFileChangeSummary, HistoryMessage, HistorySearchHit, HistorySessionDetail, HistorySessionView, HistorySourceFilter, Project, SshRemoteResumePreflight, WorktreeRecord } from "../lib/types";
+import type { HistoryFileChangeSummary, HistoryMessage, HistorySearchHit, HistorySessionDetail, HistorySessionView, HistorySourceFilter } from "../lib/types";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useProjectStore } from "../stores/projectStore";
-import { useWorktreeStore } from "../stores/worktreeStore";
 import { useExternalSessionSyncStore } from "../stores/externalSessionSyncStore";
 import { useI18n } from "../lib/i18n";
 import { getHistoryPathArgs } from "../lib/historyPathArgs";
 import { inferSubagentParentSessionId } from "../lib/historySubagents";
-import {
-  findLocalHistoryCwdProjects,
-  matchesHistoryProjectSource,
-  selectLocalHistoryResumeProject,
-} from "../lib/historyResumeProject";
-import { buildHistoryResumeCommand } from "../lib/historyResumeCommand";
 import { sameHistorySessionIdentity } from "../lib/historySessionIdentity";
 import {
   HISTORY_SOURCE_DESCRIPTOR_BY_ID,
   type HistorySourceId,
 } from "../lib/historySources";
-import { findWorktreeByPath, projectWithWorktreeProviderOverrides } from "../lib/terminalProject";
 import { projectSupportsCapability } from "../lib/projectCapabilities";
 import { PromptLibrary } from "./prompts/PromptLibrary";
 import { DiffModal } from "./history/DiffModal";
@@ -32,7 +24,7 @@ import { SessionDetailPane, type HistoryDetailView } from "./history/SessionDeta
 import { ConfirmDialog } from "./ConfirmDialog";
 import { buildHistorySessionChildMap, toGroupLabel, type TimeGroupLabel } from "./history/historyViewUtils";
 import { buildSessionProcessModel, type SessionProcessModel } from "./history/sessionEvents";
-import { HistoryResumeProjectDialog } from "./history/HistoryResumeProjectDialog";
+import { useHistoryResume } from "./history/useHistoryResume";
 import { useAppConfirm } from "./ui/useAppConfirm";
 
 const SESSION_PAGE_SIZE = 20;
@@ -71,56 +63,6 @@ function matchesSourceFilter(source: string, sourceFilter: HistorySourceFilter):
   return sourceFilter === "all" || source.toLowerCase() === sourceFilter;
 }
 
-function isAbsolutePathLike(value: string): boolean {
-  const trimmed = value.trim();
-  return /^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\") || trimmed.startsWith("/");
-}
-
-function parseProjectEnvVars(project?: Project | null): Record<string, string> | undefined {
-  if (!project) return undefined;
-  try {
-    const parsed = JSON.parse(project.env_vars || "{}");
-    if (typeof parsed !== "object" || parsed === null) return undefined;
-    const entries = Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string");
-    return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function findRemoteHistoryProjects(
-  session: HistorySessionView | HistorySessionDetail,
-  projects: Project[],
-  hostId: string,
-): Project[] {
-  const sourceProjects = projects.filter((project) => (
-    project.environment_type === "ssh"
-    && project.ssh_host_id === hostId
-    && matchesHistoryProjectSource(project, session.source)
-  ));
-  const cwd = "cwd" in session ? session.cwd?.trim() : null;
-  if (!cwd) return [];
-  const normalizedCwd = normalizePathKey(cwd);
-  return sourceProjects.filter((project) => normalizePathKey(project.remote_path) === normalizedCwd);
-}
-
-function findHistoryWorktree(session: HistorySessionView | HistorySessionDetail, worktrees: WorktreeRecord[]): WorktreeRecord | null {
-  const cwd = "cwd" in session ? session.cwd?.trim() : null;
-  return findWorktreeByPath(worktrees, cwd) ?? findWorktreeByPath(worktrees, session.project_key);
-}
-
-function resolveHistoryResumeCwd(
-  session: HistorySessionView | HistorySessionDetail,
-  project?: Project | null,
-  worktree?: WorktreeRecord | null
-): string | undefined {
-  const cwd = "cwd" in session ? session.cwd?.trim() : null;
-  if (cwd) return cwd;
-  if (worktree) return worktree.path;
-  if (project) return project.path;
-  return isAbsolutePathLike(session.project_key) ? session.project_key.trim() : undefined;
-}
-
 interface HistoryWorkspaceProps {
   active?: boolean;
 }
@@ -130,15 +72,6 @@ type DeleteIntent =
   | { type: "bulk"; sessionKeys: string[] };
 
 type HistoryTargetSource = HistorySourceId;
-
-type ResumeIntent = {
-  session: HistorySessionView | HistorySessionDetail;
-  title: string;
-  worktree: WorktreeRecord | null;
-  projects: Project[];
-  allowNewWindow: boolean;
-  remote: boolean;
-};
 
 interface HistoryConversionResult {
   source: string;
@@ -222,10 +155,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
     [projects]
   );
   const groups = useProjectStore((s) => s.groups);
-  const worktrees = useWorktreeStore((s) => s.worktrees);
-  const createSession = useTerminalStore((s) => s.createSession);
-  const terminalSessions = useTerminalStore((s) => s.sessions);
-  const setActiveTerminalSession = useTerminalStore((s) => s.setActive);
+  const { requestResume, resumeDialog } = useHistoryResume();
 
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const sessionSearchRef = useRef<HTMLInputElement | null>(null);
@@ -259,7 +189,6 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
   const batchDeleteResolverRef = useRef<((done: boolean) => void) | null>(null);
   const [liveEditWarningOpen, setLiveEditWarningOpen] = useState(false);
   const liveEditResolverRef = useRef<((allowed: boolean) => void) | null>(null);
-  const [resumeIntent, setResumeIntent] = useState<ResumeIntent | null>(null);
   const processModelCacheRef = useRef<{
     session: HistorySessionDetail;
     language: string;
@@ -798,176 +727,6 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
       : base;
   }, [batchDeleteIntent, isActiveSessionLive, t]);
 
-  const resumeSession = useCallback(async (
-    session: HistorySessionView | HistorySessionDetail,
-    title: string,
-    project: Project | null,
-    worktree: WorktreeRecord | null,
-    unscopedShell?: string
-  ) => {
-    const isRemote = session.session_ref?.transportKind === "ssh";
-    if (isRemote) {
-      const context = remoteContext;
-      const sourceSessionId = session.session_ref?.sourceSessionId?.trim() || session.session_id.trim();
-      if (!context || context.source !== session.source || !context.sourceInstanceId || !sourceSessionId) {
-        toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.remoteUnavailable") });
-        return;
-      }
-      const activeTerminal = terminalSessions.find((item) => (
-        item.environmentType === "ssh"
-        && item.sshHostId === context.hostId
-        && item.cliSessionId === sourceSessionId
-        && item.remoteHistorySourceInstanceId === context.sourceInstanceId
-      ));
-      if (activeTerminal) {
-        setActiveTerminalSession(activeTerminal.id);
-        setResumeIntent(null);
-        closeHistory();
-        return;
-      }
-      const projectPaths = project?.environment_type === "ssh" ? [project.remote_path] : context.projectPaths;
-      try {
-        const preflight = await invoke<SshRemoteResumePreflight>("history_remote_resume_preflight", {
-          consumerId: context.consumerId,
-          sshLaunch: context.launch,
-          source: context.source,
-          configuredConfigRoot: context.configuredConfigRoot,
-          projectPaths,
-          sourceInstanceId: context.sourceInstanceId,
-          sourceSessionId,
-        });
-        const launchProject = project && worktree ? projectWithWorktreeProviderOverrides(project, worktree) : project;
-        const env = {
-          ...(parseProjectEnvVars(launchProject) ?? {}),
-          ...preflight.environmentOverrides,
-        };
-        await createSession(
-          project?.id,
-          preflight.remoteCwd,
-          worktree?.name ?? (project?.name.trim() || title),
-          preflight.resumeCommand,
-          env,
-          undefined,
-          undefined,
-          worktree?.id,
-          context.hostId,
-          preflight.sourceSessionId,
-          context.consumerId,
-          context.sourceInstanceId,
-        );
-        setResumeIntent(null);
-        closeHistory({ preserveRemoteConsumer: true });
-      } catch (err) {
-        void invoke("history_remote_close", {
-          hostId: context.hostId,
-          consumerId: context.consumerId,
-        }).catch(() => undefined);
-        const code = String(err);
-        const description = code.includes("remote_session_source_missing")
-          ? t("history.resumeProject.remoteSourceMissing")
-          : code.includes("remote_session_cwd_")
-            ? t("history.resumeProject.remoteCwdUnavailable")
-            : code.includes("unsupported_resume_tool")
-              ? t("history.resumeProject.remoteToolUnavailable")
-              : code.includes("history_remote_identity_changed")
-                ? t("history.resumeProject.remoteIdentityChanged")
-                : code.includes("remote_session_active_elsewhere")
-                  ? t("history.resumeProject.remoteActiveElsewhere")
-                : code;
-        toast.error(t("history.toast.resumeTerminalFailed"), { description });
-      }
-      return;
-    }
-    const launchProject = project && worktree ? projectWithWorktreeProviderOverrides(project, worktree) : project;
-    const command = buildHistoryResumeCommand(session, launchProject);
-    if (!command) {
-      toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.invalidSession") });
-      return;
-    }
-
-    const cwd = resolveHistoryResumeCwd(session, project, worktree);
-    if (!cwd) {
-      toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.missingCwd") });
-      return;
-    }
-
-    try {
-      const requestedShell = launchProject ? launchProject.shell : unscopedShell;
-      const shell = requestedShell && requestedShell !== "powershell" ? requestedShell : undefined;
-      await createSession(
-        project?.id,
-        cwd,
-        worktree?.name ?? (project?.name.trim() || title),
-        command,
-        launchProject ? parseProjectEnvVars(launchProject) : undefined,
-        shell,
-        undefined,
-        worktree?.id,
-        undefined,
-        session.session_id.trim(),
-      );
-      setResumeIntent(null);
-      closeHistory();
-    } catch (err) {
-      toast.error(t("history.toast.resumeTerminalFailed"), { description: String(err) });
-    }
-  }, [closeHistory, createSession, remoteContext, setActiveTerminalSession, t, terminalSessions]);
-
-  const requestResume = useCallback((session: HistorySessionView | HistorySessionDetail, title: string) => {
-    if (session.session_ref?.transportKind === "ssh") {
-      if (!remoteContext) {
-        toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.remoteUnavailable") });
-        return;
-      }
-      const hostProjects = projects.filter((project) => (
-        project.environment_type === "ssh"
-        && project.ssh_host_id === remoteContext.hostId
-        && matchesHistoryProjectSource(project, session.source)
-        && (project.cli_config_root.trim()
-          ? project.cli_config_root.trim() === remoteContext.configuredConfigRoot.trim()
-          : remoteContext.scopeKind === "hostPrimary")
-      ));
-      const candidates = findRemoteHistoryProjects(session, hostProjects, remoteContext.hostId);
-      if (candidates.length === 1) {
-        void resumeSession(session, title, candidates[0], null);
-        return;
-      }
-      setResumeIntent({
-        session,
-        title,
-        worktree: null,
-        projects: candidates.length > 1 ? candidates : hostProjects,
-        allowNewWindow: candidates.length === 0,
-        remote: true,
-      });
-      return;
-    }
-    const worktree = findHistoryWorktree(session, worktrees);
-    const selection = selectLocalHistoryResumeProject(
-      session,
-      historyProjects,
-      worktree,
-      projectIdFilter,
-    );
-    const cwdProjects = findLocalHistoryCwdProjects(session, historyProjects);
-    const candidates = selection.candidates;
-
-    if (selection.project) {
-      void resumeSession(session, title, selection.project, selection.worktree);
-      return;
-    }
-
-    if (candidates.length === 0) {
-      if (cwdProjects.length === 1) {
-        void resumeSession(session, title, null, null, cwdProjects[0].shell);
-        return;
-      }
-      setResumeIntent({ session, title, worktree: null, projects, allowNewWindow: true, remote: false });
-      return;
-    }
-    setResumeIntent({ session, title, worktree: null, projects: candidates, allowNewWindow: false, remote: false });
-  }, [historyProjects, projectIdFilter, projects, remoteContext, resumeSession, t, worktrees]);
-
   const resumeConversation = useCallback(() => {
     if (!activeSession || !activeView) {
       toast.error(t("history.toast.resumeTerminalFailed"), { description: t("history.resumeProject.detailLoading") });
@@ -1362,21 +1121,7 @@ export function HistoryWorkspace({ active = true }: HistoryWorkspaceProps) {
 
       <EditAuditModal open={editAuditOpen} sessionKey={activeSessionKey} onClose={() => setEditAuditOpen(false)} />
 
-      <HistoryResumeProjectDialog
-        open={resumeIntent !== null}
-        projects={resumeIntent?.projects ?? []}
-        groups={groups}
-        useOriginalRemoteLocation={resumeIntent?.remote ?? false}
-        onUseNewWindow={resumeIntent?.allowNewWindow ? () => {
-          if (!resumeIntent) return;
-          void resumeSession(resumeIntent.session, resumeIntent.title, null, null);
-        } : undefined}
-        onSelect={(project) => {
-          if (!resumeIntent) return;
-          void resumeSession(resumeIntent.session, resumeIntent.title, project, resumeIntent.worktree);
-        }}
-        onClose={() => setResumeIntent(null)}
-      />
+      {resumeDialog}
     </>
   );
 }
