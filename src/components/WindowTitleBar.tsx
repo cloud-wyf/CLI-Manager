@@ -66,7 +66,7 @@ export function WindowTitleBar() {
   if (isMacOs) return null;
 
   return (
-    <header className="window-titlebar flex h-[26px] shrink-0 items-center bg-surface-container-low">
+    <header className="window-titlebar flex h-[26px] shrink-0 items-center">
       <div
         className="flex min-w-0 flex-1 items-center gap-2 px-2.5 text-[13px]"
         data-tauri-drag-region

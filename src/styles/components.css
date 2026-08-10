@@ -1816,19 +1816,13 @@
   pointer-events: auto;
 }
 
+/* 标题栏不持有自己的底色：背景由 .ui-workspace-shell 透上来，避免顶部出现一条
+   横切左右两个不同色区（侧栏卡片 / 主体）的独立色带。 */
 .window-titlebar {
   user-select: none;
   position: relative;
   z-index: 2;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-[data-theme="light"] .window-titlebar {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background-color: var(--surface-container-lowest);
-  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--border) 24%, transparent);
+  background-color: transparent;
 }
 
 .titlebar-btn {
@@ -3987,24 +3981,38 @@
   background-color: var(--surface);
 }
 
+/* 侧栏与 .ui-terminal-well 统一为圆角卡片：右侧不留 margin，与 well 自带的
+   左 6px 合成一条 6px 中缝，避免双份间隙。 */
 .ui-sidebar-shell {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--surface-container-high) 46%, transparent), transparent 18%),
     var(--surface-container-low);
-  border-right: 1px solid color-mix(in srgb, var(--border) 18%, transparent);
+  border-radius: 8px;
+  margin: 6px 0 6px 6px;
+  box-shadow:
+    0 1px 3px color-mix(in srgb, #000 24%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--border) 20%, transparent);
 }
 
+/* 浅色 palette 的卡片色与底板只差 2%（claude-light 是 #ffffff / #faf9f5），
+   靠填充色分不出边界，所以 ring 要压到能看见的程度，别照抄深色的 20%。 */
 [data-theme="light"] .ui-sidebar-shell {
   background: var(--surface-container-lowest);
-  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--border) 12%, transparent);
+  box-shadow:
+    0 2px 6px color-mix(in srgb, var(--on-surface) 6%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--border) 62%, transparent);
 }
 
 [data-theme="dark"][data-dark-palette="investment-platform"] .ui-sidebar-shell,
 [data-theme="light"][data-light-palette="saas-analytics-dashboard"] .ui-sidebar-shell {
-  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--border) 24%, transparent);
+  box-shadow:
+    0 1px 3px color-mix(in srgb, var(--on-surface) 8%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--border) 32%, transparent);
 }
 
-.ui-sidebar-top,
+/* .ui-sidebar-top 刻意不给边框和底色：一旦它成为独立横条，就会和右侧
+   .ui-terminal-chrome 形成"两个横条比高矮"的关系（52px vs 42px），而这两个
+   高度都是各自内容堆出来的，对齐只能靠牺牲按钮尺寸。历史面板是独立场景，保留。 */
 .ui-history-sidebar-top,
 .ui-history-detail-top {
   border-bottom: 1px solid color-mix(in srgb, var(--border) 16%, transparent);
@@ -4255,6 +4263,10 @@
   background-color: var(--surface);
 }
 
+/* chrome 是 .ui-terminal-well 的顶部区域，不是浮在 well 上的第二张卡片：
+   well 已经缩进 6px，chrome 再缩一次会让右侧比左侧多一层内边距，顶边和左右
+   都对不上侧栏。圆角/描边交给 well（它有 overflow:hidden 负责裁切），
+   这里只留一条底部内阴影和上沿高光把标签栏与终端内容分开。 */
 .ui-terminal-chrome {
   display: flex;
   align-items: center;
@@ -4263,13 +4275,11 @@
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--surface-container) 90%, white 10%) 0%, color-mix(in srgb, var(--surface-container-low) 88%, var(--surface) 12%) 100%);
   color: var(--on-surface);
-  border-radius: 10px;
-  margin: 4px 6px 0;
+  margin: 0;
   overflow: hidden;
-  outline: 1px solid color-mix(in srgb, var(--border) 52%, transparent);
   box-shadow:
-    0 12px 28px color-mix(in srgb, var(--on-surface) 6%, transparent),
-    inset 0 1px 0 color-mix(in srgb, white 36%, transparent);
+    inset 0 1px 0 color-mix(in srgb, white 36%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--border) 40%, transparent);
 }
 
 .ui-terminal-chrome .ui-tab-trigger {
