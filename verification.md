@@ -964,3 +964,22 @@
 - `cargo test commands::cc_connect::tests --lib`：48 项通过。
 - `cargo fmt --all -- --check`、`git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
 - 用户已完成真实远程托管消息冒烟，确认问题解决。
+
+## 大型用量数据库首次升级启动修复（2026-08-14）
+
+### 根因与发现清单
+
+- 根因位于前端启动监控与 SQL 迁移的异步边界：上游迁移 27 会把旧 `request_logs` 全量写入 `usage_records`；当前环境有 1,398,185 条记录、主数据库约 1.2 GB，迁移超过固定 15 秒后仍在正常执行，但前端把“耗时较长”错误转换为 `startup_timeout:stores`，重试会重新加载 WebView 并中断迁移。
+- 修改 `src/App.tsx`：15 秒阈值只切换为长时间加载提示，不再制造伪启动错误；真实 rejected promise 仍由既有初始化错误页处理。会话 Store 与主数据库拆为独立启动阶段，便于界面和日志准确定位。
+- 修改 `src/lib/i18n.ts`：补齐中文和英文的会话恢复、数据库升级及长时间初始化提示。
+- 新增 `scripts/appStartupLongMigration.test.mjs`：锁定长迁移不得进入失败页、数据库阶段和双语提示必须接入真实启动界面。
+- 已确认未修改 SQLx 迁移 25～29 的版本、SQL 或校验和，未删除、裁剪或重写用户用量记录；项目加载、同步功能、会话恢复及真实启动异常处理保持原流程。
+- GitNexus 工具当前未暴露；codebase-memory 对 `runStartupStage` 的影响分析覆盖全局 `App` 启动链路并判定为 CRITICAL，已结合启动日志、SQLite 迁移表、源码和 Git diff 复核。
+
+### 验证结果
+
+- `node scripts/appStartupLongMigration.test.mjs`：2 项通过。
+- `npx tsc --noEmit`：通过。
+- `npm run build`：通过，完成 6822 个模块转换。
+- `git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
+- 未在用户正在使用的 1.2 GB 数据库上启动新包，以免关闭或干扰现有 CLI-Manager；安装包首次运行仍需等待一次性迁移完成，后续启动不再重复迁移。
