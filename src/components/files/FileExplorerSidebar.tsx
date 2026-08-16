@@ -14,15 +14,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { copyAiText } from "../../lib/aiClipboard";
-import { formatAiPathBlock, formatAiRootTree, formatAiTree, TERMINAL_FILE_PATH_MIME } from "../../lib/aiPathFormatter";
+import { formatAiRootTree, formatAiTree, TERMINAL_FILE_PATH_MIME } from "../../lib/aiPathFormatter";
 import { debugConsoleWarn } from "../../lib/debugConsole";
 import { POINTER_DRAG_START_PX } from "../../lib/dragInteraction";
 import { useI18n, type TranslationKey } from "../../lib/i18n";
 import {
   beginTerminalFileDrag,
   commitTerminalFileDragDrop,
+  createTerminalFileDragPayload,
   endTerminalFileDrag,
   getTerminalFileDropZoneIdAtPoint,
+  TERMINAL_FILE_DRAG_MIME,
   updateTerminalFileDragPointFromEvent,
 } from "../../lib/terminalFileDrag";
 import {
@@ -49,6 +51,7 @@ import { Portal } from "../ui/Portal";
 import { ChevronRight, Copy, EyeOff, File, FileCode, Folder, FolderOpen, FolderPlus, Pencil, RefreshCw, Search, Trash2, X } from "../icons";
 import { TERM } from "../stats/termStatsUi";
 import { TerminalPanelHeader } from "../terminal/TerminalPanelHeader";
+import { PathCopyMenu } from "../PathCopyMenu";
 
 interface FileExplorerSidebarProps {
   mode?: "sidebar" | "panel";
@@ -646,9 +649,7 @@ function FileNode({
                 <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
               </ContextMenuItem>}
               <ContextMenuSeparator />
-              <ContextMenuItem onSelect={() => void copyAiText(formatAiPathBlock(displayEntry.path, displayEntry.kind), t("files.toast.aiPathCopied"))}>
-                <Copy size={13} /> {t("files.menu.copyAiPath")}
-              </ContextMenuItem>
+              <PathCopyMenu project={project} relativePath={displayEntry.path} kind={displayEntry.kind} />
               {isDir && (
                 <ContextMenuItem onSelect={() => void copyAiText(formatAiTree(project, displayEntry), t("files.toast.aiTreeCopied"))}>
                   <Folder size={13} /> {t("files.menu.copyAiTree")}
@@ -1289,13 +1290,14 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
 
   const handleFileDragStart = useCallback((event: ReactDragEvent<HTMLElement>, entry: ProjectFileEntry) => {
     if (!project) return;
-    const text = formatAiPathBlock(entry.path, entry.kind);
-    beginTerminalFileDrag(text);
+    const payload = createTerminalFileDragPayload(project, entry.path, entry.kind);
+    beginTerminalFileDrag(payload);
     updateTerminalFileDragPointFromEvent(event);
     event.dataTransfer.effectAllowed = "copyMove";
     event.dataTransfer.setData(FILE_EXPLORER_ENTRY_MIME, JSON.stringify({ kind: entry.kind, name: entry.name, path: entry.path }));
-    event.dataTransfer.setData(TERMINAL_FILE_PATH_MIME, text);
-    event.dataTransfer.setData("text/plain", text);
+    event.dataTransfer.setData(TERMINAL_FILE_DRAG_MIME, JSON.stringify(payload));
+    event.dataTransfer.setData(TERMINAL_FILE_PATH_MIME, payload.text);
+    event.dataTransfer.setData("text/plain", payload.text);
   }, [project]);
 
   const handleFileDrag = useCallback((event: ReactDragEvent<HTMLElement>) => {
@@ -1355,7 +1357,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
         resetPointerDrag();
         return;
       }
-      beginTerminalFileDrag(formatAiPathBlock(state.entry.path, state.entry.kind));
+      beginTerminalFileDrag(createTerminalFileDragPayload(project, state.entry.path, state.entry.kind));
       setDragPreview({
         x: event.clientX - state.preview.offsetX,
         y: event.clientY - state.preview.offsetY,
@@ -1487,9 +1489,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           {!readOnly && <ContextMenuItem onSelect={() => void openFileBrowserFolder(project.path, match.path, t)}>
             <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
           </ContextMenuItem>}
-          <ContextMenuItem onSelect={() => void copyAiText(formatAiPathBlock(match.path, "file"), t("files.toast.aiPathCopied"))}>
-            <Copy size={13} /> {t("files.menu.copyAiPath")}
-          </ContextMenuItem>
+          <PathCopyMenu project={project} relativePath={match.path} kind="file" />
           {(() => {
             const change = getGitChange(match.path);
             return change ? (
@@ -1578,9 +1578,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
         {!readOnly && <ContextMenuItem onSelect={() => void openFileBrowserFolder(project.path, entry.path, t)}>
           <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
         </ContextMenuItem>}
-          <ContextMenuItem onSelect={() => void copyAiText(formatAiPathBlock(entry.path, entry.kind), t("files.toast.aiPathCopied"))}>
-            <Copy size={13} /> {t("files.menu.copyAiPath")}
-          </ContextMenuItem>
+          <PathCopyMenu project={project} relativePath={entry.path} kind={entry.kind} />
           {entry.kind === "directory" && (
             <ContextMenuItem onSelect={() => void copyAiText(formatAiTree(project, entry), t("files.toast.aiTreeCopied"))}>
               <Folder size={13} /> {t("files.menu.copyAiTree")}
@@ -1596,11 +1594,6 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFile?.path, cancelRename, getDisplayStatus, getDropTargetPath, getGitChange, handleFileDragEnd, handleFileDragOver, handleFileDragStart, handleFileDrop, handleFileKeyDown, handleFilePointerCancel, handleFilePointerDown, handleFilePointerMove, handleFilePointerUp, menuPortalContainer, openFile, project, renamingAction?.path, requestOpenDiff, submitRename, t]);
-
-  const copyRootAiPath = useCallback(() => {
-    if (!project) return;
-    void copyAiText(formatAiPathBlock("", "directory"), t("files.toast.aiPathCopied"));
-  }, [project, t]);
 
   const copyRootAiTree = useCallback(() => {
     if (!project) return;
@@ -1843,9 +1836,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           {!readOnly && <ContextMenuItem onSelect={openProjectRootFolder}>
             <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
           </ContextMenuItem>}
-          <ContextMenuItem onSelect={copyRootAiPath}>
-            <Copy size={13} /> {t("files.menu.copyAiPath")}
-          </ContextMenuItem>
+          <PathCopyMenu project={project} relativePath="" kind="directory" />
           <ContextMenuItem onSelect={copyRootAiTree}>
             <Folder size={13} /> {t("files.menu.copyAiTree")}
           </ContextMenuItem>

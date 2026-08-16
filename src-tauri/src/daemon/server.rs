@@ -7,11 +7,13 @@
 use super::discovery::{remove_daemon_info, write_daemon_info_exclusive, DaemonInfo};
 use super::protocol::{
     decode_binary_terminal_frame, decode_client_frame, encode_binary_terminal_frame, encode_frame,
-    supported_features, ClientFrame, DaemonFrame, ProcessTraits, ProtocolError, ReplayEntry,
-    SessionMeta, SessionStatusInfo, BINARY_KIND_CHECKPOINT, BINARY_KIND_INPUT, BINARY_KIND_OUTPUT,
+    routing_control_id, supported_features, ClientFrame, DaemonFrame, ProcessTraits, ProtocolError,
+    ReplayEntry, RoutingCircuitStatus, RoutingError, RoutingEvent, RoutingStatus, SessionMeta,
+    SessionStatusInfo, BINARY_KIND_CHECKPOINT, BINARY_KIND_INPUT, BINARY_KIND_OUTPUT,
     BINARY_KIND_REPLAY, BINARY_KIND_REPLAY_RESET, BINARY_PROTOCOL_VERSION,
     CONTROL_PROTOCOL_VERSION, MAX_FRAME_BYTES,
 };
+use super::routing::{PortAllocator, RoutingRuntime, FALLBACK_PORT_START};
 use super::ssh_agent_bridge::SshAgentBridgeManager;
 use crate::claude_hook::{remote_hook_payload_from_spool, spawn_hook_listener, HookPayloadSink};
 use crate::commands::cc_connect::handoff_notification::RemoteHandoffNotifier;
@@ -50,6 +52,8 @@ pub const MAX_SESSIONS: usize = 64;
 pub const HOOK_CACHE_MAX: usize = 200;
 const OUTPUT_BUFFERING_DURATION: Duration = Duration::from_millis(5);
 const OUTPUT_BUFFERING_MAX_BYTES: usize = 64 * 1024;
+const CLIENT_OUTPUT_HIGH_WATERMARK: usize = 100_000;
+const CLIENT_OUTPUT_LOW_WATERMARK: usize = 5_000;
 const CLIENT_OUTPUT_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const CLIENT_CONTROL_QUEUE_MAX_FRAMES: usize = 256;
 
@@ -656,6 +660,7 @@ struct ClientHandle {
     writer: Arc<ClientWriter>,
     attached: HashSet<String>,
     unacknowledged_chars: HashMap<String, usize>,
+    flow_control_paused: HashSet<String>,
     last_sent_sequence: HashMap<String, u64>,
     last_acknowledged_sequence: HashMap<String, u64>,
     attaching: HashMap<String, Vec<DaemonFrame>>,
@@ -687,12 +692,14 @@ pub struct DaemonHost {
     pty: PtyManager,
     sessions: Mutex<HashMap<String, SharedSession>>,
     clients: Mutex<HashMap<u64, ClientHandle>>,
+    output_flow_control: (Mutex<()>, Condvar),
     last_idle_since: Mutex<Instant>,
     /// 无客户端期间收到的 hook 上报缓存，客户端连上后补发（契约）。
     hook_cache: Mutex<VecDeque<serde_json::Value>>,
     hook_gap_cache: Mutex<VecDeque<(String, u64)>>,
     hook_sink: Mutex<Option<HookPayloadSink>>,
     ssh_agent_bridges: SshAgentBridgeManager,
+    routing: Mutex<RoutingRuntime>,
     spool_dir: PathBuf,
 }
 
@@ -710,11 +717,13 @@ impl DaemonHost {
             pty: PtyManager::new(),
             sessions: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
+            output_flow_control: (Mutex::new(()), Condvar::new()),
             last_idle_since: Mutex::new(Instant::now()),
             hook_cache: Mutex::new(VecDeque::new()),
             hook_gap_cache: Mutex::new(VecDeque::new()),
             hook_sink: Mutex::new(None),
             ssh_agent_bridges: SshAgentBridgeManager::default(),
+            routing: Mutex::new(RoutingRuntime::new()),
             spool_dir,
         }
     }
@@ -751,6 +760,110 @@ impl DaemonHost {
         if let Some(host_id) = host_id {
             self.ssh_agent_bridges.release(&host_id, session_id);
         }
+    }
+
+    fn routing_status(&self) -> RoutingStatus {
+        self.routing
+            .lock()
+            .map(|runtime| {
+                let snapshot = runtime.snapshot();
+                let circuit_states = runtime
+                    .circuit_snapshots()
+                    .into_iter()
+                    .map(|circuit| RoutingCircuitStatus {
+                        app_type: circuit.app_type,
+                        provider_id: circuit.provider_id,
+                        status: circuit.status,
+                        consecutive_failures: circuit.consecutive_failures,
+                        successful_probes: circuit.successful_probes,
+                    })
+                    .collect();
+                RoutingStatus {
+                    status: snapshot.status,
+                    listener_addresses: snapshot.listen_addresses,
+                    preferred_port: snapshot.preferred_port,
+                    actual_port: snapshot.actual_port,
+                    circuit_states,
+                }
+            })
+            .unwrap_or(RoutingStatus {
+                status: "unknown".to_string(),
+                listener_addresses: Vec::new(),
+                preferred_port: FALLBACK_PORT_START,
+                actual_port: None,
+                circuit_states: Vec::new(),
+            })
+    }
+
+    fn routing_start(
+        &self,
+        listen_addresses: &[String],
+        preferred_port: u16,
+        last_actual_port: Option<u16>,
+    ) -> Result<RoutingStatus, String> {
+        let mut runtime = self
+            .routing
+            .lock()
+            .map_err(|_| "routing_runtime_unavailable".to_string())?;
+        runtime.start(listen_addresses, preferred_port, last_actual_port)?;
+        drop(runtime);
+        Ok(self.routing_status())
+    }
+
+    fn routing_reload(
+        &self,
+        listen_addresses: &[String],
+        preferred_port: u16,
+        last_actual_port: Option<u16>,
+    ) -> Result<RoutingStatus, String> {
+        let normalized_addresses = if listen_addresses.is_empty() {
+            Vec::new()
+        } else {
+            PortAllocator::validate_addresses(listen_addresses)?
+        };
+        let mut runtime = self
+            .routing
+            .lock()
+            .map_err(|_| "routing_runtime_unavailable".to_string())?;
+        if runtime.is_running() {
+            runtime.rebind(&normalized_addresses, preferred_port, last_actual_port)?;
+        } else {
+            runtime.snapshot();
+        }
+        drop(runtime);
+        Ok(self.routing_status())
+    }
+
+    fn routing_stop(&self) -> Result<RoutingStatus, String> {
+        let mut runtime = self
+            .routing
+            .lock()
+            .map_err(|_| "routing_runtime_unavailable".to_string())?;
+        runtime.stop();
+        drop(runtime);
+        Ok(self.routing_status())
+    }
+
+    fn routing_reset_circuit(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<RoutingStatus, String> {
+        let app_type = crate::provider::routing::normalize_routing_app_type(app_type)?;
+        let runtime = self
+            .routing
+            .lock()
+            .map_err(|_| "routing_runtime_unavailable".to_string())?;
+        runtime.reset_circuit(&app_type, provider_id);
+        drop(runtime);
+        Ok(self.routing_status())
+    }
+
+    fn routing_is_running(&self) -> bool {
+        self.routing
+            .lock()
+            .map(|runtime| runtime.is_running())
+            .unwrap_or(false)
     }
 
     pub(crate) fn accept_remote_hook_event(&self, value: serde_json::Value) {
@@ -1052,10 +1165,17 @@ impl DaemonHost {
             if !client.attached.contains(session_id) {
                 continue;
             }
-            *client
-                .unacknowledged_chars
-                .entry(session_id.to_string())
-                .or_default() += char_count;
+            let unacknowledged = {
+                let count = client
+                    .unacknowledged_chars
+                    .entry(session_id.to_string())
+                    .or_default();
+                *count += char_count;
+                *count
+            };
+            if unacknowledged >= CLIENT_OUTPUT_HIGH_WATERMARK {
+                client.flow_control_paused.insert(session_id.to_string());
+            }
             client
                 .last_sent_sequence
                 .insert(session_id.to_string(), sequence);
@@ -1065,6 +1185,7 @@ impl DaemonHost {
                 if buffered_bytes > CLIENT_OUTPUT_QUEUE_MAX_BYTES {
                     client.writer.close();
                     client.attached.remove(session_id);
+                    client.flow_control_paused.remove(session_id);
                 }
                 continue;
             }
@@ -1072,6 +1193,7 @@ impl DaemonHost {
                 client.writer.close();
                 client.attached.remove(session_id);
                 client.unacknowledged_chars.remove(session_id);
+                client.flow_control_paused.remove(session_id);
                 client.last_sent_sequence.remove(session_id);
                 client.last_acknowledged_sequence.remove(session_id);
             }
@@ -1092,6 +1214,7 @@ impl DaemonHost {
             if client.writer.send_frame(&frame).is_err() {
                 client.writer.close();
                 client.attached.remove(session_id);
+                client.flow_control_paused.remove(session_id);
                 break;
             }
         }
@@ -1125,9 +1248,13 @@ impl DaemonHost {
                     client
                         .last_acknowledged_sequence
                         .insert(session_id.to_string(), sequence);
+                    if *remaining <= CLIENT_OUTPUT_LOW_WATERMARK {
+                        client.flow_control_paused.remove(session_id);
+                    }
                 }
             }
         }
+        self.notify_output_flow_control();
     }
 
     fn detach_session_from_clients(&self, session_id: &str) {
@@ -1135,11 +1262,13 @@ impl DaemonHost {
             for client in clients.values_mut() {
                 client.attached.remove(session_id);
                 client.unacknowledged_chars.remove(session_id);
+                client.flow_control_paused.remove(session_id);
                 client.last_sent_sequence.remove(session_id);
                 client.last_acknowledged_sequence.remove(session_id);
                 client.attaching.remove(session_id);
             }
         }
+        self.notify_output_flow_control();
     }
 
     fn detach_all_sessions_from_clients(&self) {
@@ -1147,11 +1276,64 @@ impl DaemonHost {
             for client in clients.values_mut() {
                 client.attached.clear();
                 client.unacknowledged_chars.clear();
+                client.flow_control_paused.clear();
                 client.last_sent_sequence.clear();
                 client.last_acknowledged_sequence.clear();
                 client.attaching.clear();
             }
         }
+        self.notify_output_flow_control();
+    }
+
+    fn wait_for_output_capacity(&self, session_id: &str) -> bool {
+        let (lock, changed) = &self.output_flow_control;
+        let mut state = match lock.lock() {
+            Ok(state) => state,
+            Err(_) => return false,
+        };
+        loop {
+            let can_continue = match self.clients.lock() {
+                Ok(mut clients) => {
+                    let mut blocked = false;
+                    for client in clients.values_mut() {
+                        if !client.attached.contains(session_id) {
+                            continue;
+                        }
+                        let unacknowledged = client
+                            .unacknowledged_chars
+                            .get(session_id)
+                            .copied()
+                            .unwrap_or(0);
+                        if client.flow_control_paused.contains(session_id) {
+                            if unacknowledged > CLIENT_OUTPUT_LOW_WATERMARK {
+                                blocked = true;
+                            } else {
+                                client.flow_control_paused.remove(session_id);
+                            }
+                        } else if unacknowledged >= CLIENT_OUTPUT_HIGH_WATERMARK {
+                            client.flow_control_paused.insert(session_id.to_string());
+                            blocked = true;
+                        }
+                    }
+                    !blocked
+                }
+                Err(_) => return false,
+            };
+            if can_continue {
+                return true;
+            }
+            state = match changed.wait(state) {
+                Ok(state) => state,
+                Err(_) => return false,
+            };
+        }
+    }
+
+    fn notify_output_flow_control(&self) {
+        let Ok(_state) = self.output_flow_control.0.lock() else {
+            return;
+        };
+        self.output_flow_control.1.notify_all();
     }
 }
 
@@ -1249,6 +1431,9 @@ fn emit_daemon_output(host: &DaemonHost, session_id: &str, data: &[u8]) {
         }
     }
     if sequence == 0 {
+        return;
+    }
+    if !host.wait_for_output_capacity(session_id) {
         return;
     }
     host.push_output_to_attached(
@@ -1507,7 +1692,9 @@ impl DaemonServer {
         let server = Arc::clone(self);
         std::thread::spawn(move || loop {
             std::thread::sleep(IDLE_CHECK_INTERVAL);
-            let busy = server.host.client_count() > 0 || server.host.alive_session_count() > 0;
+            let busy = server.host.client_count() > 0
+                || server.host.alive_session_count() > 0
+                || server.host.routing_is_running();
             let Ok(mut idle_since) = server.host.last_idle_since.lock() else {
                 continue;
             };
@@ -1568,6 +1755,7 @@ impl DaemonServer {
                     writer: Arc::clone(&writer),
                     attached: HashSet::new(),
                     unacknowledged_chars: HashMap::new(),
+                    flow_control_paused: HashSet::new(),
                     last_sent_sequence: HashMap::new(),
                     last_acknowledged_sequence: HashMap::new(),
                     attaching: HashMap::new(),
@@ -1583,15 +1771,15 @@ impl DaemonServer {
                         break;
                     }
                 }
-                Err(ProtocolError::UnknownType(kind)) => {
+                Err(ProtocolError::UnknownType(_)) => {
                     // 前向兼容：未知 type 回错误帧但保持连接。
                     let _ = writer.send_frame(&DaemonFrame::Err {
                         id: 0,
-                        message: format!("unknown frame type: {kind}"),
+                        message: "unknown frame type".to_string(),
                     });
                 }
-                Err(ProtocolError::Malformed(reason)) => {
-                    log::warn!("daemon malformed frame ({peer}): {reason}");
+                Err(ProtocolError::Malformed(_)) => {
+                    log::warn!("daemon malformed frame ({peer})");
                     break; // 非法帧断连（契约）。
                 }
             }
@@ -1602,6 +1790,7 @@ impl DaemonServer {
                 client.writer.close();
             }
         }
+        self.host.notify_output_flow_control();
         log::debug!("daemon client disconnected ({peer}, id={client_id})");
     }
 
@@ -1657,6 +1846,7 @@ impl DaemonServer {
                     writer: Arc::clone(&writer),
                     attached: HashSet::new(),
                     unacknowledged_chars: HashMap::new(),
+                    flow_control_paused: HashSet::new(),
                     last_sent_sequence: HashMap::new(),
                     last_acknowledged_sequence: HashMap::new(),
                     attaching: HashMap::new(),
@@ -1669,18 +1859,27 @@ impl DaemonServer {
             match message {
                 WebSocketClientMessage::Text(line) => match decode_client_frame(&line) {
                     Ok(frame) => {
+                        if let Some(id) = routing_control_id(&frame) {
+                            let _ = writer.send_frame(&DaemonFrame::RoutingEvent {
+                                event: RoutingEvent::error(
+                                    id,
+                                    RoutingError::protocol_unsupported("websocket"),
+                                ),
+                            });
+                            continue;
+                        }
                         if !self.dispatch(client_id, frame, &writer) {
                             break;
                         }
                     }
-                    Err(ProtocolError::UnknownType(kind)) => {
+                    Err(ProtocolError::UnknownType(_)) => {
                         let _ = writer.send_frame(&DaemonFrame::Err {
                             id: 0,
-                            message: format!("unknown frame type: {kind}"),
+                            message: "unknown frame type".to_string(),
                         });
                     }
-                    Err(ProtocolError::Malformed(reason)) => {
-                        log::warn!("daemon websocket malformed frame ({peer}): {reason}");
+                    Err(ProtocolError::Malformed(_)) => {
+                        log::warn!("daemon websocket malformed frame ({peer})");
                         break;
                     }
                 },
@@ -1697,6 +1896,7 @@ impl DaemonServer {
                 client.writer.close();
             }
         }
+        self.host.notify_output_flow_control();
         log::debug!("daemon websocket client disconnected ({peer}, id={client_id})");
     }
 
@@ -1972,6 +2172,7 @@ impl DaemonServer {
                     let client = clients.get_mut(&client_id)?;
                     client.attached.insert(session_id.clone());
                     client.unacknowledged_chars.insert(session_id.clone(), 0);
+                    client.flow_control_paused.remove(&session_id);
                     client
                         .last_sent_sequence
                         .insert(session_id.clone(), latest_sequence);
@@ -2093,9 +2294,90 @@ impl DaemonServer {
                     .release_consumer(&host_id, &consumer_id);
                 DaemonFrame::Ok { id }
             }
+            ClientFrame::RoutingReload {
+                id,
+                listen_address,
+                preferred_port,
+                last_actual_port,
+                listener_addresses,
+            } => {
+                let current = self.host.routing_status();
+                let addresses = if listener_addresses.is_empty() {
+                    if let Some(address) = listen_address {
+                        vec![address]
+                    } else {
+                        current.listener_addresses.clone()
+                    }
+                } else {
+                    listener_addresses
+                };
+                match self.host.routing_reload(
+                    &addresses,
+                    preferred_port.unwrap_or(current.preferred_port),
+                    last_actual_port.or(current.actual_port),
+                ) {
+                    Ok(status) => DaemonFrame::RoutingEvent {
+                        event: RoutingEvent::status(id, status),
+                    },
+                    Err(error) => DaemonFrame::RoutingEvent {
+                        event: RoutingEvent::error(id, RoutingError::runtime_failure(&error)),
+                    },
+                }
+            }
+            ClientFrame::RoutingStatus { id } => DaemonFrame::RoutingEvent {
+                event: RoutingEvent::status(id, self.host.routing_status()),
+            },
+            ClientFrame::RoutingStart {
+                id,
+                listen_address,
+                preferred_port,
+                last_actual_port,
+                listener_addresses,
+            } => {
+                let addresses = if listener_addresses.is_empty() {
+                    vec![listen_address.unwrap_or_else(|| "127.0.0.1".to_string())]
+                } else {
+                    listener_addresses
+                };
+                match self.host.routing_start(
+                    &addresses,
+                    preferred_port.unwrap_or(FALLBACK_PORT_START),
+                    last_actual_port,
+                ) {
+                    Ok(status) => DaemonFrame::RoutingEvent {
+                        event: RoutingEvent::status(id, status),
+                    },
+                    Err(error) => DaemonFrame::RoutingEvent {
+                        event: RoutingEvent::error(id, RoutingError::runtime_failure(&error)),
+                    },
+                }
+            }
+            ClientFrame::RoutingStop { id } => match self.host.routing_stop() {
+                Ok(status) => DaemonFrame::RoutingEvent {
+                    event: RoutingEvent::status(id, status),
+                },
+                Err(error) => DaemonFrame::RoutingEvent {
+                    event: RoutingEvent::error(id, RoutingError::runtime_failure(&error)),
+                },
+            },
+            ClientFrame::RoutingResetCircuit {
+                id,
+                app_type,
+                provider_id,
+            } => match self.host.routing_reset_circuit(&app_type, &provider_id) {
+                Ok(status) => DaemonFrame::RoutingEvent {
+                    event: RoutingEvent::status(id, status),
+                },
+                Err(error) => DaemonFrame::RoutingEvent {
+                    event: RoutingEvent::error(id, RoutingError::runtime_failure(&error)),
+                },
+            },
             ClientFrame::Shutdown { id } => {
-                if self.host.alive_session_count() > 0 {
-                    return err_frame(id, "sessions active");
+                if self.host.alive_session_count() > 0 || self.host.routing_is_running() {
+                    log::info!(
+                        "daemon shutdown retained (alive sessions or active routing runtime)"
+                    );
+                    return DaemonFrame::Ok { id };
                 }
                 log::info!("daemon shutdown requested (no alive sessions)");
                 let info_path = self.info_path.clone();
@@ -2141,6 +2423,7 @@ impl DaemonServer {
             let client = clients.get_mut(&client_id)?;
             client.attached.insert(session_id.clone());
             client.unacknowledged_chars.insert(session_id.clone(), 0);
+            client.flow_control_paused.remove(&session_id);
             client.last_sent_sequence.insert(session_id.clone(), 0);
             client
                 .last_acknowledged_sequence
@@ -2191,6 +2474,7 @@ impl DaemonServer {
                     if let Some(client) = clients.get_mut(&client_id) {
                         client.attached.remove(&session_id);
                         client.unacknowledged_chars.remove(&session_id);
+                        client.flow_control_paused.remove(&session_id);
                         client.last_sent_sequence.remove(&session_id);
                         client.last_acknowledged_sequence.remove(&session_id);
                         client.attaching.remove(&session_id);
@@ -2277,6 +2561,8 @@ fn maybe_activate_app_for_hook(payload: &crate::claude_hook::ClaudeHookPayload) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::protocol::{decode_daemon_frame, ROUTING_ERROR_PROTOCOL_UNSUPPORTED};
+    use tungstenite::client::IntoClientRequest;
 
     #[test]
     fn daemon_output_batch_stops_before_crossing_live_frame_budget() {
@@ -2420,6 +2706,274 @@ mod tests {
     }
 
     #[test]
+    fn ndjson_redacts_unknown_frame_types() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Arc::new(DaemonServer {
+            host: Arc::new(DaemonHost::new()),
+            next_client_id: AtomicU64::new(1),
+            token: "token".to_string(),
+            version: "test".to_string(),
+            info_path: PathBuf::new(),
+        });
+        let server_thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            server.handle_connection(stream);
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        writer
+            .write_all(
+                encode_frame(&ClientFrame::Auth {
+                    token: "token".to_string(),
+                    client_version: "test".to_string(),
+                })
+                .as_bytes(),
+            )
+            .unwrap();
+        assert!(matches!(
+            decode_daemon_frame(&read_line_bounded(&mut reader).unwrap()).unwrap(),
+            DaemonFrame::AuthOk { .. }
+        ));
+
+        writer
+            .write_all(b"{\"type\":\"token=must-not-be-returned\",\"id\":8}\n")
+            .unwrap();
+        let DaemonFrame::Err { message, .. } =
+            decode_daemon_frame(&read_line_bounded(&mut reader).unwrap()).unwrap()
+        else {
+            panic!("expected generic daemon error");
+        };
+        assert_eq!(message, "unknown frame type");
+        assert!(!message.contains("must-not-be-returned"));
+
+        drop(writer);
+        drop(reader);
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn websocket_rejects_routing_control_and_redacts_unknown_frame_types() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Arc::new(DaemonServer {
+            host: Arc::new(DaemonHost::new()),
+            next_client_id: AtomicU64::new(1),
+            token: "token".to_string(),
+            version: "test".to_string(),
+            info_path: PathBuf::new(),
+        });
+        let server_thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            server.handle_websocket_connection(stream);
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = format!("ws://{address}/pty").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", "http://localhost:1420".parse().unwrap());
+        let (mut client, _) = tungstenite::client(request, stream).unwrap();
+        client
+            .send(Message::Text(
+                encode_frame(&ClientFrame::Auth {
+                    token: "token".to_string(),
+                    client_version: "test".to_string(),
+                })
+                .trim_end()
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            client.read().unwrap(),
+            Message::Text(text)
+                if matches!(decode_daemon_frame(text.as_ref()).unwrap(), DaemonFrame::AuthOk { .. })
+        ));
+
+        client
+            .send(Message::Text(
+                encode_frame(&ClientFrame::RoutingStart {
+                    id: 7,
+                    listen_address: None,
+                    preferred_port: None,
+                    last_actual_port: None,
+                    listener_addresses: Vec::new(),
+                })
+                .trim_end()
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let Message::Text(text) = client.read().unwrap() else {
+            panic!("expected routing rejection");
+        };
+        let DaemonFrame::RoutingEvent { event } = decode_daemon_frame(text.as_ref()).unwrap()
+        else {
+            panic!("expected routing event");
+        };
+        assert_eq!(event.request_id, Some(7));
+        let error = event.error.unwrap();
+        assert_eq!(error.code, ROUTING_ERROR_PROTOCOL_UNSUPPORTED);
+        assert_eq!(
+            error.params.get("transport").map(String::as_str),
+            Some("websocket")
+        );
+
+        client
+            .send(Message::Text(
+                r#"{"type":"token=must-not-be-returned","id":8}"#.to_string().into(),
+            ))
+            .unwrap();
+        let Message::Text(text) = client.read().unwrap() else {
+            panic!("expected unknown-frame error");
+        };
+        let DaemonFrame::Err { message, .. } = decode_daemon_frame(text.as_ref()).unwrap() else {
+            panic!("expected generic daemon error");
+        };
+        assert_eq!(message, "unknown frame type");
+        assert!(!message.contains("must-not-be-returned"));
+
+        drop(client);
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn routing_reset_circuit_before_runtime_returns_closed_status() {
+        let server = DaemonServer {
+            host: Arc::new(DaemonHost::new()),
+            next_client_id: AtomicU64::new(1),
+            token: String::new(),
+            version: String::new(),
+            info_path: PathBuf::new(),
+        };
+        let reply = server.handle_frame(
+            0,
+            ClientFrame::RoutingResetCircuit {
+                id: 9,
+                app_type: "codex".to_string(),
+                provider_id: "token=must-not-be-returned".to_string(),
+            },
+        );
+        let encoded = encode_frame(&reply);
+        let DaemonFrame::RoutingEvent { event } = reply else {
+            panic!("expected routing event");
+        };
+        assert_eq!(event.request_id, Some(9));
+        assert_eq!(event.error, None);
+        assert_eq!(event.status.unwrap().status, "stopped");
+        assert!(!encoded.contains("must-not-be-returned"));
+    }
+
+    #[test]
+    fn routing_start_binds_and_stop_keeps_actual_port() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let preferred_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = DaemonServer {
+            host: Arc::new(DaemonHost::new()),
+            next_client_id: AtomicU64::new(1),
+            token: String::new(),
+            version: String::new(),
+            info_path: PathBuf::new(),
+        };
+
+        let start = server.handle_frame(
+            0,
+            ClientFrame::RoutingStart {
+                id: 10,
+                listen_address: Some("127.0.0.1".to_string()),
+                preferred_port: Some(preferred_port),
+                last_actual_port: None,
+                listener_addresses: Vec::new(),
+            },
+        );
+        let DaemonFrame::RoutingEvent { event } = start else {
+            panic!("expected routing status");
+        };
+        let status = event.status.expect("running status");
+        assert_eq!(status.status, "running");
+        assert_eq!(status.actual_port, Some(preferred_port));
+
+        let stop = server.handle_frame(0, ClientFrame::RoutingStop { id: 11 });
+        let DaemonFrame::RoutingEvent { event } = stop else {
+            panic!("expected routing status");
+        };
+        let status = event.status.expect("stopped status");
+        assert_eq!(status.status, "stopped");
+        assert_eq!(status.actual_port, Some(preferred_port));
+    }
+
+    #[test]
+    fn shutdown_retains_daemon_while_routing_runtime_is_active() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let preferred_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = DaemonServer {
+            host: Arc::new(DaemonHost::new()),
+            next_client_id: AtomicU64::new(1),
+            token: String::new(),
+            version: String::new(),
+            info_path: PathBuf::new(),
+        };
+
+        let start = server.handle_frame(
+            0,
+            ClientFrame::RoutingStart {
+                id: 20,
+                listen_address: Some("127.0.0.1".to_string()),
+                preferred_port: Some(preferred_port),
+                last_actual_port: None,
+                listener_addresses: Vec::new(),
+            },
+        );
+        assert!(matches!(start, DaemonFrame::RoutingEvent { .. }));
+
+        let shutdown = server.handle_frame(0, ClientFrame::Shutdown { id: 21 });
+        assert!(matches!(shutdown, DaemonFrame::Ok { id: 21 }));
+        assert!(server.host.routing_is_running());
+
+        let stop = server.handle_frame(0, ClientFrame::RoutingStop { id: 22 });
+        assert!(matches!(stop, DaemonFrame::RoutingEvent { .. }));
+    }
+
+    #[test]
+    fn routing_reload_rejects_wildcard_while_stopped() {
+        let server = DaemonServer {
+            host: Arc::new(DaemonHost::new()),
+            next_client_id: AtomicU64::new(1),
+            token: String::new(),
+            version: String::new(),
+            info_path: PathBuf::new(),
+        };
+        let reply = server.handle_frame(
+            0,
+            ClientFrame::RoutingReload {
+                id: 12,
+                listen_address: Some("0.0.0.0".to_string()),
+                preferred_port: Some(FALLBACK_PORT_START),
+                last_actual_port: None,
+                listener_addresses: Vec::new(),
+            },
+        );
+        let DaemonFrame::RoutingEvent { event } = reply else {
+            panic!("expected routing error");
+        };
+        assert_eq!(
+            event.error.expect("routing error").code,
+            "routing_listen_address_invalid"
+        );
+    }
+
+    #[test]
     fn websocket_replay_allows_control_frames_to_preempt_between_entries() {
         let session_id = "0e0f7b0a-1234-4c5d-9e8f-aabbccddeeff";
         let meta = test_session(session_id, SessionBuffer::new(), 1)
@@ -2526,6 +3080,7 @@ mod tests {
                 writer: ClientWriter::new(ClientTransport::Ndjson(Mutex::new(server_stream))),
                 attached: HashSet::new(),
                 unacknowledged_chars: HashMap::new(),
+                flow_control_paused: HashSet::new(),
                 last_sent_sequence: HashMap::new(),
                 last_acknowledged_sequence: HashMap::new(),
                 attaching: HashMap::new(),
@@ -2592,6 +3147,7 @@ mod tests {
                 writer: Arc::clone(&writer),
                 attached: HashSet::new(),
                 unacknowledged_chars: HashMap::new(),
+                flow_control_paused: HashSet::new(),
                 last_sent_sequence: HashMap::new(),
                 last_acknowledged_sequence: HashMap::new(),
                 attaching: HashMap::new(),
@@ -2651,6 +3207,7 @@ mod tests {
                 writer: ClientWriter::new(ClientTransport::Ndjson(Mutex::new(server_stream))),
                 attached: HashSet::from([session_id.to_string()]),
                 unacknowledged_chars: HashMap::from([(session_id.to_string(), 10)]),
+                flow_control_paused: HashSet::from([session_id.to_string()]),
                 last_sent_sequence: HashMap::from([(session_id.to_string(), 2)]),
                 last_acknowledged_sequence: HashMap::from([(session_id.to_string(), 1)]),
                 attaching: HashMap::new(),
@@ -2663,8 +3220,64 @@ mod tests {
         let client = clients.get(&1).unwrap();
         assert!(!client.attached.contains(session_id));
         assert!(!client.unacknowledged_chars.contains_key(session_id));
+        assert!(!client.flow_control_paused.contains(session_id));
         assert!(!client.last_sent_sequence.contains_key(session_id));
         assert!(!client.last_acknowledged_sequence.contains_key(session_id));
+        drop(peer);
+    }
+
+    #[test]
+    fn output_flow_control_waits_for_low_watermark() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = TcpStream::connect(address).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        let host = Arc::new(DaemonHost::new());
+        let session_id = "flow-control";
+        host.clients.lock().unwrap().insert(
+            1,
+            ClientHandle {
+                writer: ClientWriter::new(ClientTransport::Ndjson(Mutex::new(server_stream))),
+                attached: HashSet::from([session_id.to_string()]),
+                unacknowledged_chars: HashMap::from([(
+                    session_id.to_string(),
+                    CLIENT_OUTPUT_HIGH_WATERMARK - 1,
+                )]),
+                flow_control_paused: HashSet::new(),
+                last_sent_sequence: HashMap::new(),
+                last_acknowledged_sequence: HashMap::new(),
+                attaching: HashMap::new(),
+            },
+        );
+        let frame = DaemonFrame::Output {
+            session_id: session_id.to_string(),
+            sequence: 1,
+            cols: 80,
+            rows: 24,
+            data_base64: String::new(),
+        };
+        host.push_output_to_attached(session_id, 1, 1, &frame);
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter_host = Arc::clone(&host);
+        let waiter_session = session_id.to_string();
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(waiter_host.wait_for_output_capacity(&waiter_session))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        host.acknowledge_output(
+            1,
+            session_id,
+            1,
+            CLIENT_OUTPUT_HIGH_WATERMARK - CLIENT_OUTPUT_LOW_WATERMARK,
+        );
+        assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
         drop(peer);
     }
 
