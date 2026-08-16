@@ -1469,14 +1469,12 @@ export function Sidebar({
     setSelectedProjectIds(new Set([project.id]));
     setSelectedGroupIds((prev) => (prev.size === 0 ? prev : new Set()));
     selectionAnchorRef.current = project.id;
-    // 双击（开终端）会连发两次 click，只让第一次切换展开态，避免展开又立刻收起。
-    if (e.detail <= 1 && canExpandProjectHistory(project)) {
-      projectHistory.toggle(project);
-    }
+    // 展开历史只认行尾那个箭头：单击若也 toggle，就和双击开终端抢同一串 click 事件，
+    // 想「收起再展开」刷新时必然被识别成双击。
     if (activateFirstProjectSession(project.id)) {
       closeHistory();
     }
-  }, [activateFirstProjectSession, canExpandProjectHistory, closeHistory, onTerminalScopeChange, projectHistory, projectScopedTerminalViewEnabled, selectedProjectIds, visibleProjectIds]);
+  }, [activateFirstProjectSession, closeHistory, onTerminalScopeChange, projectScopedTerminalViewEnabled, selectedProjectIds, visibleProjectIds]);
 
   const handleSelectProjectByKeyboard = useCallback((project: Project) => {
     setSelectedId(project.id);
@@ -1805,6 +1803,7 @@ export function Sidebar({
       expandedHistoryProjectIds: projectHistory.expandedIds,
       historyByProject: projectHistory.byProject,
       canExpandProjectHistory,
+      onToggleProjectHistory: projectHistory.toggle,
       onReloadProjectHistory: projectHistory.reload,
       onLoadMoreProjectHistory: projectHistory.loadMore,
       onResumeHistorySession: handleResumeHistorySession,

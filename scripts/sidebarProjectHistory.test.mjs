@@ -44,20 +44,28 @@ test("inline history expansion is gated to local projects outside compact mode",
   assert.match(gate, /projectSupportsCapability\(project, "history"\)/);
 });
 
-test("plain project click toggles history once and respects the gate", () => {
+test("history expansion lives on the row chevron, never on plain click", () => {
   const clickHandler = sidebar.match(
     /const handleSelectProject = useCallback\(\(e: ReactMouseEvent, project: Project\) => \{[\s\S]*?\n  \}, \[/
   )?.[0];
 
   assert.ok(clickHandler, "handleSelectProject should exist");
-  // 双击开终端会连发两次 click，第二次不能把刚展开的历史又收起来。
-  assert.match(
-    clickHandler,
-    /e\.detail <= 1 && canExpandProjectHistory\(project\)[\s\S]*?projectHistory\.toggle\(project\)/
-  );
-  // 修饰键多选分支必须在 toggle 之前 return，不能连带展开。
-  const additiveBranch = clickHandler.slice(0, clickHandler.indexOf("e.detail <= 1"));
-  assert.doesNotMatch(additiveBranch, /projectHistory\.toggle/);
+  // 单击一旦也 toggle，就和双击开终端抢同一串 click 事件：想「收起再展开」刷新
+  // 必然被识别成双击。detail 计数是那场冲突的补丁，冲突没了它也不该回来。
+  assert.doesNotMatch(clickHandler, /projectHistory\.toggle/);
+  assert.doesNotMatch(clickHandler, /e\.detail/);
+  assert.match(sidebar, /onToggleProjectHistory: projectHistory\.toggle,/);
+
+  const chevron = treeNodeItem.match(
+    /\{actions\.canExpandProjectHistory\(p\) && \([\s\S]*?\n {10}\)\}/
+  )?.[0];
+  assert.ok(chevron, "project row should render a history chevron behind the gate");
+  assert.match(chevron, /actions\.onToggleProjectHistory\(p\)/);
+  // 点箭头不能冒泡成选中；连点两次不能冒泡成行的双击开终端。
+  assert.match(chevron, /onClick=\{\(e\) => \{\s*e\.stopPropagation\(\);/);
+  assert.match(chevron, /onDoubleClick=\{\(e\) => e\.stopPropagation\(\)\}/);
+  // 双击开终端保留：箭头拆出去之后它不再和展开抢事件。
+  assert.match(treeNodeItem, /onDoubleClick=\{\(\) => actions\.onOpenProject\(p\)\}/);
 });
 
 test("sidebar resumes through the shared history resume flow", () => {

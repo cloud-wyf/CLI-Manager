@@ -20,6 +20,7 @@ export interface TreeActions {
   expandedHistoryProjectIds: Set<string>;
   historyByProject: Record<string, ProjectHistoryState>;
   canExpandProjectHistory: (p: Project) => boolean;
+  onToggleProjectHistory: (p: Project) => void;
   onReloadProjectHistory: (p: Project) => void;
   onLoadMoreProjectHistory: (p: Project) => void;
   onResumeHistorySession: (p: Project, session: HistorySessionSummary) => void;

@@ -451,14 +451,28 @@ function TreeNodeItemImpl({
               </span>
             )}
           </span>
-          <span
-            className="ui-tree-item-actions hidden shrink-0 items-center gap-0.5 group-hover/item:flex group-focus-within/item:flex"
-            onDoubleClick={(e) => e.stopPropagation()}
-          >
-            <button onClick={(e) => { e.stopPropagation(); actions.onOpenProject(p); }} className="icon-btn" style={{ color: "var(--success)", opacity: 0.7 }} title={t("sidebar.tree.openTerminal")}>
-              <Play size={14} strokeWidth={1.5} />
+          {actions.canExpandProjectHistory(p) && (
+            <button
+              type="button"
+              className="ui-tree-chevron inline-flex items-center justify-center"
+              aria-label={historyOpen ? t("sidebar.tree.collapseHistory") : t("sidebar.tree.expandHistory")}
+              title={historyOpen ? t("sidebar.tree.collapseHistory") : t("sidebar.tree.expandHistory")}
+              aria-expanded={historyOpen}
+              onPointerDownCapture={(e) => e.stopPropagation()}
+              // 连点两次是「收起再展开」刷新，不能冒泡成行的双击去开终端。
+              onDoubleClick={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                actions.onToggleProjectHistory(p);
+              }}
+            >
+              <ChevronRight
+                size={12}
+                strokeWidth={2}
+                style={{ transition: "transform 150ms", transform: historyOpen ? "rotate(90deg)" : "rotate(0)" }}
+              />
             </button>
-          </span>
+          )}
         </div>
         {hasWorktrees && worktreesOpen && (
           <div className={`ui-worktree-children ${compact ? "space-y-0.5" : "space-y-0.5"}`} role="group">
