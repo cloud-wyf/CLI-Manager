@@ -589,13 +589,19 @@ mod tests {
     }
 
     #[test]
+    fn grok_history_capabilities_include_delete_resume_and_realtime_stats() {
+        let grok = SOURCES.iter().find(|spec| spec.id == "grok").unwrap();
+        assert_eq!(grok.capabilities.delete, "supported");
+        assert_eq!(grok.capabilities.realtime_stats, "supported");
+        assert_eq!(grok.capabilities.resume, "supported");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn grok_default_candidate_is_the_session_root() {
         let grok = SOURCES.iter().find(|spec| spec.id == "grok").unwrap();
         let candidate = default_candidate_path_from_home(grok, Path::new(r"C:\Users\tester"));
         assert_eq!(candidate, PathBuf::from(r"C:\Users\tester\.grok\sessions"));
-        assert_eq!(grok.capabilities.delete, "supported");
-        assert_eq!(grok.capabilities.realtime_stats, "supported");
-        assert_eq!(grok.capabilities.resume, "supported");
     }
 
     #[test]

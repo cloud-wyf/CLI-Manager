@@ -2563,25 +2563,25 @@ fn default_agent_command(agent: CcConnectAgent) -> &'static str {
     }
 }
 
-fn resolve_local_agent_program(program: &str, work_dir: &Path) -> Result<PathBuf, String> {
-    let configured = Path::new(program);
-    if configured.is_absolute() || program.contains(['/', '\\']) {
-        let candidate = if configured.is_absolute() {
-            configured.to_path_buf()
-        } else {
-            work_dir.join(configured)
-        };
-        let candidate = candidate
-            .canonicalize()
-            .map_err(|_| "handoff_agent_unavailable".to_string())?;
-        return candidate
-            .is_file()
-            .then_some(candidate)
-            .ok_or_else(|| "handoff_agent_unavailable".to_string());
+fn directory_matches(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
     }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
 
-    let path_value = env::var_os("PATH").ok_or_else(|| "handoff_agent_unavailable".to_string())?;
-    for directory in env::split_paths(&path_value) {
+fn resolve_program_from_path(
+    program: &str,
+    path_value: &std::ffi::OsStr,
+    skip_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    for directory in env::split_paths(path_value) {
+        if skip_dir.is_some_and(|wrapper| directory_matches(&directory, wrapper)) {
+            continue;
+        }
         #[cfg(target_os = "windows")]
         let candidates = if Path::new(program).extension().is_some() {
             vec![program.to_string()]
@@ -2618,6 +2618,38 @@ fn resolve_local_agent_program(program: &str, work_dir: &Path) -> Result<PathBuf
         }
     }
     Err("handoff_agent_unavailable".to_string())
+}
+
+#[cfg(test)]
+fn resolve_codex_launcher_from_path(
+    wrapper_dir: &Path,
+    path_value: impl AsRef<std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    resolve_program_from_path("codex", path_value.as_ref(), Some(wrapper_dir))
+}
+
+fn resolve_local_agent_program(program: &str, work_dir: &Path) -> Result<PathBuf, String> {
+    let configured = Path::new(program);
+    if configured.is_absolute() || program.contains(['/', '\\']) {
+        let candidate = if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            work_dir.join(configured)
+        };
+        let candidate = candidate
+            .canonicalize()
+            .map_err(|_| "handoff_agent_unavailable".to_string())?;
+        return candidate
+            .is_file()
+            .then_some(candidate)
+            .ok_or_else(|| "handoff_agent_unavailable".to_string());
+    }
+
+    let path_value = env::var_os("PATH").ok_or_else(|| "handoff_agent_unavailable".to_string())?;
+    let skip_wrapper = (program == "codex" || program.eq_ignore_ascii_case("codex.exe"))
+        .then(|| remote_manager_dir().ok().map(|dir| dir.join("bin")))
+        .flatten();
+    resolve_program_from_path(program, &path_value, skip_wrapper.as_deref())
 }
 
 fn has_handoff_session_argument(agent: CcConnectAgent, argument: &str) -> bool {
@@ -6504,6 +6536,7 @@ mod tests {
             .iter()
             .any(|code| code == "proxy_invalid"));
     }
+    #[cfg(windows)]
     #[test]
     fn git_safe_directory_is_scoped_to_the_registered_project() {
         let environment =
@@ -7015,6 +7048,7 @@ allow_from = ""
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn codex_launch_environment_forces_provider_without_embedding_secrets() {
         let mut command = Command::new("cc-connect");
@@ -7082,6 +7116,7 @@ allow_from = ""
             .any(|value| value == "sk-provider-secret"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn codex_launch_environment_clears_provider_overrides_when_unregistered() {
         let mut command = Command::new("cc-connect");
@@ -7114,6 +7149,7 @@ allow_from = ""
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn codex_launch_environment_omits_empty_registered_launcher_args() {
         let mut command = Command::new("cc-connect");

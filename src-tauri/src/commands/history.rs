@@ -7083,7 +7083,12 @@ fn looks_like_grok_linux_updates(linux_path: &str) -> bool {
     let Some((parent, name)) = normalized.rsplit_once('/') else {
         return false;
     };
-    name.eq_ignore_ascii_case("updates.jsonl") && parent.contains('/')
+    if !name.eq_ignore_ascii_case("updates.jsonl") {
+        return false;
+    }
+    parent
+        .rsplit_once('/')
+        .is_some_and(|(workspace, session_id)| !workspace.is_empty() && !session_id.is_empty())
 }
 
 fn grok_project_key_from_linux_path(linux_path: &str) -> String {
@@ -15548,6 +15553,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].source, "cursor");
         assert_eq!(files[0].project_key, "f-github-CLI-Manager");
+        #[cfg(windows)]
         assert!(session_matches_project_path(
             &files[0],
             &normalize_history_path(r"F:\github\CLI-Manager")
