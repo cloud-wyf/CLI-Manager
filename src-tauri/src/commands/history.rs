@@ -2788,9 +2788,10 @@ pub async fn history_get_stats(
     let index = if target_source_instance.is_some() {
         None
     } else {
-        Some(refresh_history_index_snapshot(&roots, force))
+        Some(history_index_snapshot_for_stats(&roots, force))
     };
     let index_generation = index.as_ref().map(|index| index.generation).unwrap_or(0);
+    let opencode_generation = include_opencode.then(opencode_stats_generation);
     let cache_key = make_history_stats_aggregation_cache_key(
         &roots,
         source_filter.as_deref(),
@@ -2799,10 +2800,11 @@ pub async fn history_get_stats(
         target_source_instance.as_deref(),
         bounds,
         index_generation,
+        opencode_generation.as_deref(),
         crate::usage::route_usage_generation(),
     );
 
-    if !force && !include_opencode {
+    if !force {
         if let Some(response) = stats_aggregation_cache_get(&cache_key) {
             log_history_stats_oom_diagnostic(
                 "history_get_stats_cache_hit",
@@ -2913,9 +2915,7 @@ pub async fn history_get_stats(
         &response,
         started_at.elapsed().as_millis(),
     );
-    if !include_opencode {
-        stats_aggregation_cache_set(cache_key, response.clone());
-    }
+    stats_aggregation_cache_set(cache_key, response.clone());
     Ok(response)
 }
 
@@ -3070,6 +3070,22 @@ async fn opencode_stats_facts(
         }
     }
     Ok(facts)
+}
+
+fn opencode_stats_generation() -> String {
+    let database_path = resolve_opencode_database_path();
+    let wal_path = PathBuf::from(format!("{}-wal", database_path.to_string_lossy()));
+    let database = session_file_fingerprint(&database_path);
+    let wal = session_file_fingerprint(&wal_path);
+    format!(
+        "db={}:{}:{}|wal={}:{}:{}",
+        database.created_at,
+        database.updated_at,
+        database.size,
+        wal.created_at,
+        wal.updated_at,
+        wal.size
+    )
 }
 
 fn opencode_summary_from_parsed(parsed: &OpenCodeParsedSession) -> HistorySessionSummary {
@@ -3667,10 +3683,11 @@ fn make_history_stats_aggregation_cache_key(
     target_source_instance: Option<&str>,
     bounds: StatsTimeBounds,
     index_generation: u64,
+    opencode_generation: Option<&str>,
     route_usage_generation: u64,
 ) -> String {
     format!(
-        "{}|source={}|project={}|project_paths={}|source_instance={}|start={}|end={}|gen={}|route_gen={}",
+        "{}|source={}|project={}|project_paths={}|source_instance={}|start={}|end={}|gen={}|opencode_gen={}|route_gen={}",
         roots.cache_key(),
         source_filter.unwrap_or("__all__"),
         target_project.unwrap_or("__all__"),
@@ -3679,6 +3696,7 @@ fn make_history_stats_aggregation_cache_key(
         bounds.start_at,
         bounds.end_at,
         index_generation,
+        opencode_generation.unwrap_or("__excluded__"),
         route_usage_generation
     )
 }
@@ -3943,6 +3961,21 @@ fn refresh_history_index_snapshot(roots: &HistoryRoots, force: bool) -> HistoryS
     save_persisted_history_index(&next);
 
     next
+}
+
+fn history_index_snapshot_for_stats(roots: &HistoryRoots, force: bool) -> HistorySessionIndex {
+    if force {
+        return refresh_history_index_snapshot(roots, true);
+    }
+    if let Ok(index) = get_history_index().read() {
+        if index.roots.eq(roots) && index.refreshed_at > 0 {
+            return index.clone();
+        }
+    }
+    if let Some(persisted) = load_persisted_history_index(roots) {
+        return persisted;
+    }
+    refresh_history_index_snapshot(roots, false)
 }
 
 fn build_history_index(
@@ -16370,6 +16403,43 @@ mod tests {
             history_stats_project_paths_cache_key(&paths),
             history_stats_project_paths_cache_key(&reordered)
         );
+    }
+
+    #[test]
+    fn history_stats_aggregation_cache_key_tracks_opencode_generation() {
+        let roots = history_roots(None, None, None);
+        let bounds = StatsTimeBounds {
+            start_at: DAY_MS,
+            end_at: 2 * DAY_MS - 1,
+            start_day: DAY_MS,
+            range_days: 1,
+            explicit: true,
+        };
+        let first = make_history_stats_aggregation_cache_key(
+            &roots,
+            None,
+            None,
+            &[],
+            None,
+            bounds,
+            7,
+            Some("db=1|wal=2"),
+            11,
+        );
+        let second = make_history_stats_aggregation_cache_key(
+            &roots,
+            None,
+            None,
+            &[],
+            None,
+            bounds,
+            7,
+            Some("db=1|wal=3"),
+            11,
+        );
+
+        assert_ne!(first, second);
+        assert!(first.contains("opencode_gen=db=1|wal=2"));
     }
 
     #[test]

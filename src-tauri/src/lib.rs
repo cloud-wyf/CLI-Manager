@@ -625,6 +625,120 @@ const MIGRATION_CREATE_HISTORY_GENERATED_TITLES_SQL: &str = "
                 CREATE INDEX IF NOT EXISTS idx_history_generated_titles_state
                     ON history_generated_titles(generation_state, updated_at DESC);
             ";
+pub(crate) const MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION: i64 = 31;
+pub(crate) const MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL: &str = "
+                CREATE INDEX IF NOT EXISTS idx_usage_records_project_path
+                    ON usage_records(project_path, started_at_ms DESC);
+                DROP VIEW IF EXISTS unified_usage_records;
+                CREATE VIEW unified_usage_records AS
+                SELECT
+                    u.record_id AS request_id,
+                    u.source,
+                    COALESCE(u.project_key, '') AS project_key,
+                    COALESCE(u.project_path, '') AS project_path,
+                    COALESCE(u.session_id, '') AS session_id,
+                    COALESCE(u.file_path, '') AS file_path,
+                    u.event_index,
+                    u.started_at_ms AS timestamp_ms,
+                    COALESCE(u.outbound_model, u.response_model, u.requested_model, u.pricing_model) AS model,
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_read_tokens,
+                    u.cache_creation_tokens,
+                    u.data_source,
+                    u.provider_id,
+                    u.provider_name,
+                    u.requested_model,
+                    u.outbound_model,
+                    u.response_model,
+                    u.usage_status,
+                    u.status_code,
+                    u.outcome,
+                    u.duration_ms,
+                    u.attempt_count,
+                    u.degraded
+                FROM usage_records u
+                WHERE u.data_source = 'route'
+                   OR NOT EXISTS (
+                        SELECT 1
+                        FROM usage_records r
+                        WHERE r.data_source = 'route'
+                          AND r.usage_status IN ('complete', 'partial')
+                          AND NULLIF(TRIM(r.session_id), '') IS NOT NULL
+                          AND r.source = u.source
+                          AND r.session_id = u.session_id
+                          AND COALESCE(r.completed_at_ms, r.started_at_ms)
+                              BETWEEN u.started_at_ms - 120000 AND u.started_at_ms + 120000
+                          AND LOWER(COALESCE(r.outbound_model, r.response_model, r.requested_model, ''))
+                              = LOWER(COALESCE(u.response_model, u.pricing_model, ''))
+                          AND r.output_tokens = u.output_tokens
+                          AND (
+                              r.input_tokens = u.input_tokens
+                              OR r.input_tokens = u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens
+                              OR u.input_tokens = r.input_tokens + r.cache_read_tokens + r.cache_creation_tokens
+                          )
+                   );
+              ";
+pub(crate) const MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION: i64 = 32;
+pub(crate) const MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL: &str = r#"
+                UPDATE usage_records
+                   SET project_path = LOWER(RTRIM(REPLACE(TRIM(project_key), '\', '/'), '/'))
+                 WHERE NULLIF(TRIM(project_path), '') IS NULL
+                   AND NULLIF(TRIM(project_key), '') IS NOT NULL
+                   AND (
+                        SUBSTR(REPLACE(TRIM(project_key), '\', '/'), 1, 1) = '/'
+                        OR SUBSTR(REPLACE(TRIM(project_key), '\', '/'), 2, 2) = ':/'
+                   );
+                WITH normalized_projects AS (
+                    SELECT
+                        LOWER(TRIM(name)) AS project_name,
+                        LOWER(RTRIM(REPLACE(TRIM(path), '\', '/'), '/')) AS project_path
+                    FROM projects
+                    WHERE COALESCE(environment_type, 'local') <> 'ssh'
+                      AND NULLIF(TRIM(path), '') IS NOT NULL
+                ),
+                resolved_paths AS (
+                    SELECT target.record_id, MIN(project.project_path) AS project_path
+                    FROM usage_records AS target
+                    JOIN normalized_projects AS project
+                      ON project.project_name = LOWER(TRIM(target.project_key))
+                      OR project.project_path = LOWER(RTRIM(REPLACE(TRIM(target.project_key), '\', '/'), '/'))
+                      OR project.project_path LIKE '%/' || LOWER(TRIM(target.project_key))
+                    WHERE NULLIF(TRIM(target.project_path), '') IS NULL
+                      AND NULLIF(TRIM(target.project_key), '') IS NOT NULL
+                    GROUP BY target.record_id
+                    HAVING COUNT(DISTINCT project.project_path) = 1
+                )
+                UPDATE usage_records
+                   SET project_path = (
+                        SELECT resolved.project_path
+                        FROM resolved_paths AS resolved
+                        WHERE resolved.record_id = usage_records.record_id
+                   )
+                 WHERE record_id IN (SELECT record_id FROM resolved_paths);
+                UPDATE usage_records AS target
+                   SET project_path = (
+                        SELECT session.project_path
+                          FROM usage_records AS session
+                         WHERE session.data_source = 'session_log'
+                           AND session.source = target.source
+                           AND session.session_id = target.session_id
+                           AND NULLIF(TRIM(session.project_path), '') IS NOT NULL
+                         ORDER BY session.updated_at_ms DESC
+                         LIMIT 1
+                   )
+                 WHERE target.data_source = 'route'
+                   AND NULLIF(TRIM(target.project_path), '') IS NULL
+                   AND NULLIF(TRIM(target.session_id), '') IS NOT NULL
+                   AND EXISTS (
+                        SELECT 1
+                          FROM usage_records AS session
+                         WHERE session.data_source = 'session_log'
+                           AND session.source = target.source
+                           AND session.session_id = target.session_id
+                           AND NULLIF(TRIM(session.project_path), '') IS NOT NULL
+                   );
+              "#;
 pub(crate) const MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_SQL: &str = "
                 CREATE INDEX IF NOT EXISTS idx_usage_records_route_dedup
                 ON usage_records(
@@ -967,6 +1081,18 @@ fn migrations() -> Vec<Migration> {
             version: MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION,
             description: MIGRATION_CREATE_HISTORY_GENERATED_TITLES_DESCRIPTION,
             sql: MIGRATION_CREATE_HISTORY_GENERATED_TITLES_SQL,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION,
+            description: "materialize_request_log_project_path",
+            sql: MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION,
+            description: "backfill_request_log_project_path",
+            sql: MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL,
             kind: MigrationKind::Up,
         },
     ]
@@ -1874,7 +2000,11 @@ mod provider_migration_tests {
     use crate::provider::{
         MIGRATION_CREATE_NATIVE_PROVIDERS_VERSION, MIGRATION_LEGACY_PROVIDERS_VERSION,
     };
-    use crate::MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION;
+    use crate::{
+        MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION,
+        MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION,
+        MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION,
+    };
 
     #[test]
     fn registry_keeps_legacy_v25_before_native_v26() {
@@ -1893,7 +2023,7 @@ mod provider_migration_tests {
     }
 
     #[test]
-    fn history_generated_titles_migration_is_additive_and_last() {
+    fn history_generated_titles_and_request_project_path_migrations_are_additive() {
         let registry = migrations();
         let title_migrations: Vec<_> = registry
             .iter()
@@ -1910,10 +2040,133 @@ mod provider_migration_tests {
         assert!(title_migration
             .sql
             .contains("idx_history_generated_titles_state"));
+        let project_path_migration = registry
+            .iter()
+            .find(|migration| {
+                migration.version == MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION
+            })
+            .expect("request project path migration must be registered");
+        assert_eq!(project_path_migration.version, 31);
+        assert!(project_path_migration
+            .sql
+            .contains("COALESCE(u.project_path, '') AS project_path"));
+        assert!(project_path_migration
+            .sql
+            .contains("idx_usage_records_project_path"));
+        let project_path_backfill = registry
+            .iter()
+            .find(|migration| {
+                migration.version == MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION
+            })
+            .expect("request project path backfill must be registered");
+        assert_eq!(project_path_backfill.version, 32);
+        assert!(project_path_backfill
+            .sql
+            .contains("UPDATE usage_records AS target"));
+        assert!(project_path_backfill
+            .sql
+            .contains("SELECT session.project_path"));
+        assert!(title_migration.version < project_path_migration.version);
+        assert!(project_path_migration.version < project_path_backfill.version);
         assert!(registry
             .iter()
-            .all(|migration| migration.version <= title_migration.version));
+            .all(|migration| migration.version <= project_path_backfill.version));
         assert!(registry.iter().any(|migration| migration.version == 29
             && migration.description == "optimize_unified_usage_record_queries"));
+    }
+}
+
+#[cfg(test)]
+mod request_log_project_path_migration_tests {
+    use super::{
+        MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL, MIGRATION_CREATE_REQUEST_LOGS_SQL,
+        MIGRATION_CREATE_USAGE_RECORDS_SQL, MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL,
+    };
+    use sqlx::{Connection, Row, SqliteConnection};
+
+    #[tokio::test]
+    async fn materialized_project_path_migration_backfills_legacy_rows_idempotently() {
+        let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                environment_type TEXT NOT NULL DEFAULT 'local'
+             )",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects(id, name, path, environment_type) VALUES
+                ('project-a', 'Configured Project', 'D:\\Work\\Project-A', 'local'),
+                ('duplicate-a', 'Duplicate A', 'D:\\Work\\One\\Duplicate', 'local'),
+                ('duplicate-b', 'Duplicate B', 'E:\\Work\\Two\\Duplicate', 'wsl'),
+                ('remote', 'Project-A', '', 'ssh')",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_REQUEST_LOGS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_USAGE_RECORDS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_records(
+                record_id, logical_request_id, data_source, source, session_id,
+                project_key, project_path, started_at_ms, created_at_ms, updated_at_ms
+             ) VALUES
+                ('absolute', 'absolute', 'session_log', 'grok', 'session-absolute',
+                 '/mnt/d/Work/App/', NULL, 1, 1, 1),
+                ('configured', 'configured', 'session_log', 'codex', 'session-configured',
+                 'Project-A', NULL, 2, 2, 2),
+                ('ambiguous', 'ambiguous', 'session_log', 'codex', 'session-ambiguous',
+                 'Duplicate', NULL, 3, 3, 3),
+                ('existing', 'existing', 'session_log', 'opencode', 'session-existing',
+                 'Existing', 'keep/me', 4, 4, 4),
+                ('route', 'route', 'route', 'codex', 'session-configured',
+                 'Project-A', NULL, 5, 5, 5)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        for statement in MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&mut conn).await.unwrap();
+            }
+        }
+        for _ in 0..2 {
+            for statement in MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL.split(';') {
+                let statement = statement.trim();
+                if !statement.is_empty() {
+                    sqlx::query(statement).execute(&mut conn).await.unwrap();
+                }
+            }
+        }
+
+        let rows = sqlx::query("SELECT record_id, project_path FROM usage_records")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        let project_path = |record_id: &str| {
+            rows.iter()
+                .find(|row| row.get::<String, _>("record_id") == record_id)
+                .and_then(|row| row.get::<Option<String>, _>("project_path"))
+        };
+        assert_eq!(project_path("absolute").as_deref(), Some("/mnt/d/work/app"));
+        assert_eq!(
+            project_path("configured").as_deref(),
+            Some("d:/work/project-a")
+        );
+        assert_eq!(project_path("route").as_deref(), Some("d:/work/project-a"));
+        assert_eq!(project_path("ambiguous"), None);
+        assert_eq!(project_path("existing").as_deref(), Some("keep/me"));
     }
 }

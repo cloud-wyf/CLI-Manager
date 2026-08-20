@@ -473,8 +473,10 @@ export function ProviderQuickSwitchPanel({ open, defaultAppType, onOpenSettings 
         <div className="space-y-2" role="radiogroup" aria-label={t("providerQuickSwitch.providerList")}>
           {rows.map((provider, index) => {
             const selected = provider.id === currentId;
-            const circuit = failover?.circuits.find((item) => item.providerId === provider.id)
-              ?? (failover?.circuit.providerId === provider.id ? failover.circuit : null);
+            const circuit = autoFailover
+              ? failover?.circuits.find((item) => item.providerId === provider.id)
+                ?? (failover?.circuit.providerId === provider.id ? failover.circuit : null)
+              : null;
             const vendor = inferVendor(`${provider.name} ${provider.model ?? ""} ${provider.baseUrl ?? ""}`);
             // 当前供应商由整张卡片的高亮表达；右侧只用状态圆点呈现可用性/熔断状态。
             // 左右标记绝对居中，正文保持单列，避免为两个装饰标记拆成三列布局。
