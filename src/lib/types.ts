@@ -1073,7 +1073,7 @@ export interface RequestLogItem {
   requested_model?: string | null;
   outbound_model?: string | null;
   response_model?: string | null;
-  usage_status?: "complete" | "partial" | "missing" | "invalid";
+  usage_status?: "complete" | "partial" | "missing" | "invalid" | "not_applicable";
   status_code?: number | null;
   outcome?: string;
   duration_ms?: number;

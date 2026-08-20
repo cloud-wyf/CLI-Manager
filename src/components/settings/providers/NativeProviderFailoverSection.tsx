@@ -216,7 +216,7 @@ export function NativeProviderFailoverSection({ appType, state }: NativeProvider
                 <SortableContext items={orderedProviders.map((provider) => provider.id)} strategy={verticalListSortingStrategy}>
                   <Stack gap="xs">
                     {orderedProviders.map((provider) => {
-                      const circuit = circuitByProvider.get(provider.id);
+                      const circuit = manualSwitch ? undefined : circuitByProvider.get(provider.id);
                       const circuitStatus = circuit?.status;
                       const circuitLabel = circuitStatus === "open"
                         ? t("providerCatalog.failover.circuit.open")

@@ -8,7 +8,7 @@
 
 ### 1. Scope / Trigger
 
-- Trigger: changes touching `history_get_stats`, `history_get_session`, history message parsing, stats aggregation, or frontend consumers of history usage fields.
+- Trigger: changes touching `history_get_stats`, `history_get_session`, history message parsing, route usage recording/failover attempt accounting, stats aggregation, or frontend consumers of history usage fields.
 - This is a cross-layer contract because Rust parses JSONL history files, serializes command responses, `historyStore` normalizes payloads, and UI components render totals, charts, and per-session panels.
 
 ### 2. Signatures
@@ -109,6 +109,12 @@ interface HistorySessionDetail {
 interface TerminalSession {
   cliSessionId?: string;
 }
+
+interface RequestLogItem {
+  usage_status?: "complete" | "partial" | "missing" | "invalid" | "not_applicable";
+  outcome?: "success" | "error" | "skipped" | string;
+  attempt_count?: number;
+}
 ```
 
 ### 3. Contracts
@@ -132,6 +138,8 @@ interface TerminalSession {
 - Selecting an SSH project in historical usage first synchronizes that project's remote catalog scope, then calls `history_get_stats` with both `remote_path` and the validated remote `source_instance_id`. Remote instance filtering excludes local facts and other hosts/config roots even when they expose the same path.
 - Opening SSH historical usage must not be a forced index rebuild. The frontend sends `force=false` by default; only explicit manual refresh may force remote sync. When `history_get_stats.source_instance_id` is present, the backend reads v2 catalog facts directly, skips `refresh_history_index_snapshot`, and filters by `history_sessions.source_instance_id` in SQL before Rust-side project-path matching.
 - Stats aggregation cache keys include `source_instance_id`; remote catalog stats may use aggregation cache when `force=false`. A successful `history_remote_sync` apply must invalidate stats caches so a newly applied remote generation is visible on the next stats read.
+- A non-forced local `history_get_stats` read must reuse a matching in-memory index snapshot or the persisted `history-index-cache.json` snapshot before considering a history-file refresh. Only an explicit forced read or the background synchronization owner may recursively enumerate local history roots.
+- Stats aggregation cache keys for scopes that include OpenCode must include a cheap generation derived from the OpenCode database and its WAL metadata. Default all-source queries may read and write the aggregation cache; OpenCode inclusion alone must not disable it.
 - Realtime “today project usage” sends the parent project path plus all active Worktree paths in one `project_paths` request. Backend aggregation iterates each indexed session once, so overlapping parent/child paths cannot double count usage.
 - Stats aggregation and daily-index cache keys must include the canonical sorted/deduplicated project-path set, so ordering and duplicates reuse the same cache while different path sets remain isolated.
 - Route-backed stats must include a route-usage generation in the aggregation cache key. Writing a new `usage_records(data_source='route')` row must make the next `history_get_stats` call observe it without requiring a history-file refresh or `force=true`.
@@ -139,8 +147,14 @@ interface TerminalSession {
 - `unified_usage_records` is the request-log billing source of truth. Route rows with usable usage are authoritative; a same-source local session row is hidden only when `source + session_id + model + output_tokens` match within 120 seconds of route completion (fall back to route start time) and input tokens match either directly or after folding cache read/write into input. This cache-inclusive compatibility is required for Codex/Gemini-style route responses whose `input_tokens` semantics differ from normalized local history rows.
 - The same cache-inclusive token compatibility and completion-time anchor apply when `merge_route_usage_into_history_stats` replaces a local fact. The request-log table, summary cards, request-log stats, and history overview must not use divergent route/session dedup rules.
 - Route request-log attribution must join `usage_records(data_source='route')` to `request_logs` by both normalized `source` and non-empty `session_id`. A resolved row must copy `project_key` and the history transcript path into `usage_records.file_path`, because `unified_usage_records` and the request-log UI read `file_path` for project/session display and session opening; `project_path` alone is not sufficient. Attribution SQL errors must propagate from `history_sync_request_logs` instead of being discarded.
+- Request-log list, summary, and today-project reads are pure reads of persisted SQLite state. They must not invoke `history_sync_request_logs`, refresh the history index, enumerate history roots, or wait for full-table route attribution.
+- Application startup, the periodic maintenance timer, and explicit local refresh share one request-log synchronization entry point. Background/startup calls remain single-flight, while an explicit local refresh must issue a forced call that queues behind any older scan instead of joining it. Every successful sync invalidates `historyStats`, because non-request-log sources can advance the history generation without changing request-log row counters; request-log list/stat queries are invalidated only when files or rows changed.
+- Session-log usage rows persist a normalized `project_path`, and `unified_usage_records` exposes it. Project filtering expands the configured path into equivalent Windows/WSL/UNC candidates and matches exact paths or descendants. Migration v32 backfills empty legacy paths from absolute keys, unambiguous configured-project mappings, and matching session rows for route records; remaining empty rows may use bounded legacy project-key matching (including the existing Claude encoding), but reads must not resolve the filter through a history-index or source-directory scan.
+- Route writes and changed session-document writes run attribution only for their normalized `(source, session_id)`. A bounded background legacy repair may reconcile older pending rows, but it must not block request-log synchronization or interactive reads.
 - SSE usage collectors must accept both `\n\n` and standard `\r\n\r\n` event delimiters. A streaming body Drop caused by client cancellation must finish the usage commit with an explicit interruption error.
-- Every failed provider/key attempt in a failover sequence writes a status-only route record with the shared logical request id and attempt index; the final response writes its own attempt record.
+- Every real upstream `.send()` consumes one slot from the shared provider-attempt budget and receives a unique attempt index, including retries across keys, rectifiers, and providers. Every failed send before a later retry/failover writes one status-only route record with the shared logical request id and its attempt index; the final response writes its own attempt record, and no send may occur after the configured limit is reached.
+- A route candidate skipped before any upstream request because its circuit is open, its keys are cooling down, or its snapshot endpoint is unusable is recorded as `outcome='skipped'` with `usage_status='not_applicable'`; it must not increment the provider-attempt budget or circuit failure counters. A successful response with no usage remains `missing`.
+- A local statistics refresh reports synchronization failures in the active UI language, preserves the last successful data and refresh timestamp, and must not refetch stale SQLite data as if synchronization succeeded.
 - Heatmap-compatible buckets must include `sessions`, `messages`, `level`, and `session_refs`. Daily heatmap buckets use `day_start_utc`; hourly activity buckets use `hour_start_utc` plus `hour` so the frontend can render 24-hour drilldowns without guessing local bucket anchors.
 - `historyStore` must accept snake_case payload fields and legacy camelCase fallbacks when normalizing stats data. `normalizeDetail` must pass message token fields through (it previously dropped them, making per-session token panels read 0).
 - Unknown or unsupported models must not fake a price. They contribute to `unpriced_tokens` and `total_cost_usd` remains unaffected.
@@ -206,11 +220,18 @@ interface TerminalSession {
 | Claude/Codex log exposes an explicit positive context limit field | Return that value as `context_window`; most recent exposed value wins during a scan. |
 | Same session switches model after earlier usage dominates totals | Keep `dominant_model` as the aggregate/dominant model, but return the latest model as `current_model` for realtime display. |
 | History cache invalidation runs | Clear file, stats, project, and aggregate caches together. |
+| Non-forced local stats read has a matching memory or persisted index snapshot | Aggregate from that snapshot without recursively enumerating the history roots. |
+| All-source stats include OpenCode and its DB/WAL metadata are unchanged | Reuse the aggregation cache; do not disable caching merely because OpenCode is selected. |
+| Request-log page opens, filters, or changes page | Query the current SQLite snapshot immediately; do not run history synchronization or full route attribution first. |
+| Request-log project filter targets Windows, WSL, UNC, or a Worktree descendant | Match the materialized normalized path candidate in SQL and return only that project scope without refreshing the history index. |
 | Route row has `source + session_id` match in `request_logs` | Set `project_key`, `file_path`, and `attribution_status='resolved'`; the request-log row becomes openable. |
 | Route row has a non-empty session id but no same-source match | Keep project/file fields empty and set `attribution_status='unattributed'`. |
 | Route attribution SQL fails | Return the error from `history_sync_request_logs`; do not silently leave rows `pending`. |
 | Route and local rows share source/session/model/output, but route input equals local input plus cache tokens | Treat them as the same request and retain only route usage. |
 | Route/local source, session, model, output, input semantics, or 120-second completion-time window do not match | Keep both records; do not suppress unrelated local usage. |
+| Candidate circuit is open or all provider keys are cooling down before send | Record a skipped/not-applicable status row, release a half-open permit if acquired, keep actual attempt count unchanged, and continue to the next candidate. |
+| Every candidate is circuit-open, cooling down, or otherwise unavailable before send | Preserve fail-fast `503 routing_provider_circuit_open`; do not force an upstream probe and do not report missing usage. |
+| Upstream request was sent and failed | Record an error attempt, increment actual attempt/circuit failure accounting, and apply the existing retry/failover budget. |
 
 ### 5. Good/Base/Bad Cases
 
@@ -229,7 +250,10 @@ interface TerminalSession {
 - Good: StatsPanel selects a configured project path such as `D:\work\pythonProject\CLI-Manager`; frontend sends `projectPath`, backend matches Claude/Codex sessions through `session_matches_project_path`, and cache keys stay distinct from raw `projectKey` queries.
 - Good: TerminalStatsPanel on the main or Worktree tab sends the same parent + active Worktree path set and displays one deduplicated project total.
 - Good: a Codex route row sharing `source + session_id` with a local request-log row inherits its project key and transcript file, so the request-log table shows and can open the owning session.
+- Good: opening or paging request logs returns the current database snapshot while a shared background incremental sync independently discovers new history rows and invalidates the query after committing them.
+- Good: reopening default all-source historical usage with unchanged local history generation, route generation, and OpenCode DB/WAL generation reuses the aggregation cache and persisted history snapshot without walking every JSONL file.
 - Good: a Codex route row stores `input_tokens=1000`, while its local history row stores `input_tokens=100` plus `cache_read_tokens=900`; the unified request log keeps the route row and suppresses the local duplicate.
+- Good: provider A is circuit-open and provider B has cooling keys; both are recorded as skipped without consuming attempts, then healthy provider C receives actual attempt 1.
 - Base: a Codex session without model pricing still appears in stats with token totals and `unpriced_tokens`; a single-day stats view can map `hourly_activity` into 24 hourly trend and heatmap buckets.
 - Bad: frontend assumes a newly added numeric field is always present and renders `NaN` when older cached payloads omit it; realtime stats uses only project latest-session lookup and shows another window's current context.
 - Bad: a stats panel open passes `force=true` unconditionally, causing `history_get_stats` to rebuild indexes and repeatedly recompute fixed historical data.
@@ -238,6 +262,9 @@ interface TerminalSession {
 - Bad: realtime today-usage reuses `latestSession.project_key` as the only filter after the session was found by Worktree path; the path context is lost and usage may be omitted.
 - Bad: route attribution writes only `project_path` or swallows a failed update; `unified_usage_records.file_path` stays empty and the UI shows an unknown project with no session action.
 - Bad: route/session dedup compares all four stored token columns for equality, so cache-inclusive route input never matches normalized local input and both rows are billed and displayed.
+- Bad: a request-log query waits for `history_sync_request_logs`, calls `refresh_history_index_snapshot` to resolve its project filter, or runs full legacy route attribution before returning a page.
+- Bad: selecting OpenCode unconditionally bypasses the stats aggregation cache even when its database and WAL generation are unchanged.
+- Bad: a cooldown/circuit skip calls `record_circuit_failure` or increments the retry counter, opening downstream circuits without sending a request and causing a premature local 503.
 
 ### 6. Tests Required
 
@@ -263,7 +290,13 @@ interface TerminalSession {
   - Claude explicit context-window fields populate `SessionStatsScan.context_window`; Claude usage without those fields keeps it `None`.
   - Same-session model switching keeps `dominant_model` unchanged for aggregate stats while exposing the latest model as `current_model`.
   - Route attribution resolves `project_key + file_path` for a same-source session match and marks unmatched non-empty session IDs as `unattributed`.
+  - Targeted route attribution copies the materialized project path and resolves only the supplied same-source session.
+  - Request-log project filtering covers Windows, WSL `/mnt/*`, WSL UNC, descendant/Worktree paths, and the Claude project-key fallback without a history-index refresh.
+  - Stats aggregation cache keys change when the OpenCode database or WAL generation changes and remain reusable when that generation is stable.
   - Unified request logs and history overview replace a cache-split local fact with its same-source/session/model/output route row using route completion time; mismatched source or token events remain separate.
+  - Key selection distinguishes an empty key pool from a non-empty pool whose keys are all cooling down.
+  - Candidate skips preserve actual provider-attempt budget and do not increment circuit failure counters; a healthy later provider remains eligible.
+  - Empty failed/skipped captures classify as `not_applicable`, while an empty successful response remains `missing`.
 - Frontend checks:
   - `npm run build` must pass after payload/type changes.
   - Stats UI must render missing token/cost fields as zero, not `NaN`.
@@ -403,3 +436,23 @@ AND (
 ```
 
 Keep output/model/session/time as identity guards, then normalize the known input-token semantic difference at the unified data boundary.
+
+#### Wrong
+
+```rust
+record_circuit_failure(&state, &mut permit, policy);
+provider_attempts += 1; // candidate was only skipped
+```
+
+Circuit-open and key-cooldown states are pre-send eligibility results, not
+upstream failures.
+
+#### Correct
+
+```rust
+record_skip("routing_provider_keys_cooling_down", actual_provider_attempts);
+provider_index += 1; // actual_provider_attempts is unchanged
+```
+
+Advance the candidate cursor, preserve the real retry budget, and reserve
+circuit failure accounting for requests that were sent upstream.

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getDb } from "../lib/db";
 import { createPerfMarker, logInfo, logWarn } from "../lib/logger";
+import { queryClient } from "../lib/queryClient";
 import { normalizeHistoryProjectPaths, resolveHistoryProjectPath } from "../lib/historyProjectPaths";
 import { buildSshAgentHistoryContext, type SshAgentHistoryContext } from "../lib/sshAgentHistory";
 import { ensureHistorySourceSettingsLoaded, getHistoryPathArgs, getHistoryPathArgsSync } from "../lib/historyPathArgs";
@@ -805,19 +806,24 @@ export interface FetchHistoryRequestLogStatsOptions {
   force?: boolean;
 }
 
-let requestLogSyncPromise: Promise<unknown> | null = null;
+let requestLogSyncPromise: Promise<RequestLogSyncResult> | null = null;
+
+function requestLogSyncChanged(result: RequestLogSyncResult): boolean {
+  return result.changed_files > 0 || result.removed_files > 0 || result.written_rows > 0;
+}
+
+function invalidateRequestLogQueries(): void {
+  void queryClient.invalidateQueries({ queryKey: ["historyRequestLogs"] });
+  void queryClient.invalidateQueries({ queryKey: ["historyRequestLogStats"] });
+}
+
+function invalidateHistoryStatsQueries(): void {
+  void queryClient.invalidateQueries({ queryKey: ["historyStats"] });
+}
 
 export async function syncHistoryRequestLogs(force = false): Promise<RequestLogSyncResult> {
   if (requestLogSyncPromise && !force) {
-    await requestLogSyncPromise;
-    return {
-      scanned_files: 0,
-      changed_files: 0,
-      removed_files: 0,
-      written_rows: 0,
-      failed_files: 0,
-      synced_at_ms: 0,
-    };
+    return requestLogSyncPromise;
   }
   const pathArgs = await getHistoryPathArgs();
   const promise = invoke<RequestLogSyncResult>("history_sync_request_logs", {
@@ -826,7 +832,10 @@ export async function syncHistoryRequestLogs(force = false): Promise<RequestLogS
   });
   requestLogSyncPromise = promise;
   try {
-    return await promise;
+    const result = await promise;
+    if (requestLogSyncChanged(result)) invalidateRequestLogQueries();
+    invalidateHistoryStatsQueries();
+    return result;
   } finally {
     if (requestLogSyncPromise === promise) requestLogSyncPromise = null;
   }
@@ -835,7 +844,6 @@ export async function syncHistoryRequestLogs(force = false): Promise<RequestLogS
 export async function fetchHistoryRequestLogStats(
   options: FetchHistoryRequestLogStatsOptions,
 ): Promise<RequestLogStatsPayload> {
-  await syncHistoryRequestLogs(options.force ?? false);
   const filters = {
     source: normalizeSourceFilter(options.sourceFilter),
     project_key: options.projectKey?.trim() || null,
@@ -1079,7 +1087,6 @@ export async function fetchTodayProjectStats(
   const normalizedProjectPaths = normalizeHistoryProjectPaths(projectPaths ?? []);
   const hasProjectPaths = normalizedProjectPaths.length > 0;
   try {
-    await syncHistoryRequestLogs(false);
     const raw = await invoke<unknown>("history_get_stats", {
       source: source ?? null,
       ...(await getHistoryPathArgs()),

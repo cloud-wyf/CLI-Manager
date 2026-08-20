@@ -35,7 +35,7 @@ import { useProjectStore } from "./stores/projectStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { flushTerminalSnapshotsNow } from "./lib/sessionSnapshotPersistence";
 import { useSyncStore } from "./stores/syncStore";
-import { useHistoryStore } from "./stores/historyStore";
+import { syncHistoryRequestLogs, useHistoryStore } from "./stores/historyStore";
 import { useExternalSessionSyncStore } from "./stores/externalSessionSyncStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useDesktopPetCoordinator } from "./hooks/useDesktopPetCoordinator";
@@ -49,7 +49,6 @@ import { debugConsoleWarn } from "./lib/debugConsole";
 import { createPerfMarker, logInfo, logWarn } from "./lib/logger";
 import { getContrastRatioFromHex, MIN_APPLY_CONTRAST_RATIO } from "./lib/contrast";
 import { getDb } from "./lib/db";
-import { getHistoryPathArgs } from "./lib/historyPathArgs";
 import { translateCurrent, useI18n } from "./lib/i18n";
 import { getOsPlatform } from "./lib/shell";
 import { normalizeFontFamilyStack } from "./lib/systemFonts";
@@ -613,10 +612,7 @@ function App() {
       try {
         await getDb();
         if (disposed) return;
-        await invoke("history_sync_request_logs", {
-          ...(await getHistoryPathArgs()),
-          force: false,
-        });
+        await syncHistoryRequestLogs(false);
       } catch (err) {
         logWarn("Failed to sync local request logs", err);
       } finally {
