@@ -53,11 +53,30 @@ const CODEX_HOOKS: &[(&str, &str, &str)] = &[
     ("SubagentStop", "SubagentStop", ""),
 ];
 
+const GROK_HOOKS: &[(&str, &str, &str)] = &[
+    ("SessionStart", "SessionStart", ""),
+    ("UserPromptSubmit", "UserPromptSubmit", ""),
+    (
+        "PreToolUse",
+        "PermissionRequest",
+        "Bash|Edit|Write|MultiEdit",
+    ),
+    ("Stop", "Stop", ""),
+    ("StopFailure", "StopFailure", ""),
+    ("SubagentStart", "SubagentStart", ""),
+    ("SubagentStop", "SubagentStop", ""),
+    ("PreToolUse", "AgentToolStart", "Agent|Task"),
+    ("PostToolUse", "AgentToolStop", "Agent|Task"),
+    ("PreToolUse", "ToolStart", ""),
+    ("PostToolUse", "ToolStop", ""),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     Claude,
     Codex,
     Kimi,
+    Grok,
 }
 
 impl Source {
@@ -66,6 +85,7 @@ impl Source {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "kimi" => Ok(Self::Kimi),
+            "grok" => Ok(Self::Grok),
             _ => Err("hook_source_invalid".to_string()),
         }
     }
@@ -75,6 +95,7 @@ impl Source {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Grok => "grok",
         }
     }
 
@@ -83,6 +104,7 @@ impl Source {
             Self::Claude => ".claude",
             Self::Codex => ".codex",
             Self::Kimi => ".kimi-code",
+            Self::Grok => ".grok",
         }
     }
 
@@ -91,6 +113,7 @@ impl Source {
             Self::Claude => CLAUDE_HOOKS,
             Self::Codex => CODEX_HOOKS,
             Self::Kimi => &[],
+            Self::Grok => GROK_HOOKS,
         }
     }
 
@@ -390,7 +413,7 @@ fn resolve_recorded_uninstall_root(
         let canonical = PathBuf::from(&record.canonical_config_root);
         validate_canonical_path(&canonical)?;
         let record_hash = match (source, record.history_source_candidate.as_ref()) {
-            (Source::Kimi, None) => config_root_hash(&canonical),
+            (Source::Kimi | Source::Grok, None) => config_root_hash(&canonical),
             (Source::Claude | Source::Codex, Some(candidate))
                 if candidate.source == source.as_str()
                     && candidate.canonical_config_root == record.canonical_config_root
@@ -1041,6 +1064,39 @@ fn uninstall_codex_feature(
     Ok(())
 }
 
+fn apply_grok_compat_isolation(document: &mut DocumentMut) {
+    for vendor in ["claude", "cursor"] {
+        document["compat"][vendor]["hooks"] = value(false);
+    }
+}
+
+fn grok_compat_hooks_disabled(document: &DocumentMut, vendor: &str) -> bool {
+    let nested = document
+        .get("compat")
+        .and_then(Item::as_table_like)
+        .and_then(|compat| compat.get(vendor))
+        .and_then(Item::as_table_like)
+        .and_then(|table| table.get("hooks"))
+        .and_then(Item::as_bool);
+    let dotted_table = document
+        .get(&format!("compat.{vendor}"))
+        .and_then(Item::as_table_like)
+        .and_then(|table| table.get("hooks"))
+        .and_then(Item::as_bool);
+    let dotted_key = document
+        .get("compat")
+        .and_then(Item::as_table_like)
+        .and_then(|compat| compat.get(&format!("{vendor}.hooks")))
+        .and_then(Item::as_bool);
+    nested.or(dotted_table).or(dotted_key) == Some(false)
+}
+
+fn grok_compat_isolated(document: &DocumentMut) -> bool {
+    ["claude", "cursor"]
+        .iter()
+        .all(|vendor| grok_compat_hooks_disabled(document, vendor))
+}
+
 fn plan_files(
     root: &ResolvedRoot,
     source: Source,
@@ -1075,6 +1131,63 @@ fn plan_files(
             }],
             plan.managed_entries,
             plan.conflict || plan.outdated,
+        ));
+    }
+    if source == Source::Grok {
+        let json_state = resolve_config_file(root, "grokHooks", "hooks/cli-manager.json")?;
+        let mut json_value = read_json(&json_state)?;
+        let original_json = json_value.clone();
+        let expected = exact_commands(installation, source);
+        let (managed_entries, conflict, outdated) = inspect_json(&json_value, source, &expected)?;
+        match operation {
+            Some(true) => {
+                if conflict {
+                    return Err("hook_config_owner_conflict".to_string());
+                }
+                add_exact_hooks(&mut json_value, source, &expected)?;
+            }
+            Some(false) => {
+                if conflict {
+                    return Err("hook_config_owner_conflict".to_string());
+                }
+                remove_exact_hooks(&mut json_value, source, &expected)?;
+            }
+            None => {}
+        }
+        let json_after_exists = json_state.exists || operation == Some(true);
+        let json_after = if !json_after_exists {
+            Vec::new()
+        } else if json_state.exists && json_value == original_json {
+            json_state.bytes.clone()
+        } else {
+            serialize_json(&json_value)?
+        };
+        let toml_state = resolve_config_file(root, "grokCompat", "config.toml")?;
+        let mut document = parse_toml(&toml_state)?;
+        let toml_after = match operation {
+            Some(true) => {
+                apply_grok_compat_isolation(&mut document);
+                document.to_string().into_bytes()
+            }
+            _ if toml_state.exists => toml_state.bytes.clone(),
+            _ => Vec::new(),
+        };
+        let toml_after_exists = toml_state.exists || operation == Some(true);
+        return Ok((
+            vec![
+                PlannedFile {
+                    before: json_state,
+                    after: json_after,
+                    after_exists: json_after_exists,
+                },
+                PlannedFile {
+                    before: toml_state,
+                    after: toml_after,
+                    after_exists: toml_after_exists,
+                },
+            ],
+            managed_entries,
+            conflict || outdated,
         ));
     }
     let json_state = resolve_config_file(
@@ -1177,9 +1290,19 @@ fn current_status(
     if conflict {
         return Ok(("conflict".to_string(), managed));
     }
-    let feature_ready = source != Source::Codex || {
-        let document = parse_toml(&plans[1].before)?;
-        codex_feature_enabled(&document)
+    let feature_ready = match source {
+        Source::Codex => {
+            let document = parse_toml(&plans[1].before)?;
+            codex_feature_enabled(&document)
+        }
+        Source::Grok => {
+            if plans.len() < 2 {
+                false
+            } else {
+                grok_compat_isolated(&parse_toml(&plans[1].before)?)
+            }
+        }
+        _ => true,
     };
     let required = source.required_entries();
     let status = if managed == 0 {
@@ -1595,10 +1718,12 @@ fn installation_record(
         managed_entries: source.required_entries(),
         adapter_version: ADAPTER_VERSION,
         installed_at: now_ms(),
-        history_source_candidate: (source != Source::Kimi).then(|| HookHistorySourceCandidate {
-            source: source.as_str().to_string(),
-            canonical_config_root: path_text(&root.canonical),
-            config_root_hash: root.hash.clone(),
+        history_source_candidate: matches!(source, Source::Claude | Source::Codex).then(|| {
+            HookHistorySourceCandidate {
+                source: source.as_str().to_string(),
+                canonical_config_root: path_text(&root.canonical),
+                config_root_hash: root.hash.clone(),
+            }
         }),
     }
 }
@@ -1740,15 +1865,15 @@ pub fn apply(request: HookConfigRequest, install: bool) -> Result<HookConfigRepo
 #[cfg(test)]
 mod tests {
     use super::{
-        add_exact_hooks, apply_transaction, feature_marker, fingerprint, hook_command,
-        inspect_json, install_codex_feature, parse_owned_marker, recover_transaction,
-        remove_exact_hooks, transaction_dir, uninstall_codex_feature, FileState, PlannedFile,
-        Source, TransactionFile, TransactionJournal,
+        add_exact_hooks, apply_transaction, feature_marker, fingerprint, grok_compat_isolated,
+        hook_command, inspect_json, install_codex_feature, parse_owned_marker, parse_toml,
+        recover_transaction, remove_exact_hooks, transaction_dir, uninstall_codex_feature,
+        FileState, PlannedFile, Source, TransactionFile, TransactionJournal,
     };
     #[cfg(unix)]
     use super::{
-        config_target_unchanged, installation_record, plan_files, supports_current_kimi,
-        validate_kimi_candidate, ResolvedRoot,
+        config_target_unchanged, exact_commands, installation_record, plan_files,
+        supports_current_kimi, validate_kimi_candidate, ResolvedRoot,
     };
     use crate::installer::InstallationRecord;
     use crate::layout::AgentLayout;
@@ -1823,6 +1948,120 @@ mod tests {
 
         let record = installation_record(Source::Kimi, &root, &installation, &plans);
         assert!(record.history_source_candidate.is_none());
+    }
+
+    #[test]
+    fn grok_source_uses_native_root_and_permission_request_command() {
+        let installation = installation_record_for_test(std::path::Path::new(
+            "/opt/cli-manager/cli-manager-ssh-agent",
+        ));
+        assert_eq!(Source::Grok.default_dir(), ".grok");
+        assert_eq!(Source::Grok.required_entries(), 11);
+        assert_eq!(
+            hook_command(&installation, Source::Grok, "PermissionRequest"),
+            "'/opt/cli-manager/cli-manager-ssh-agent' hook --source grok --event PermissionRequest --managed-by cli-manager-ssh-agent --installation-id 00000000-0000-4000-8000-000000000001"
+        );
+    }
+
+    fn grok_compat_doc(text: &str) -> toml_edit::DocumentMut {
+        parse_toml(&FileState {
+            role: "grokCompat",
+            logical_path: "config.toml".into(),
+            canonical_path: "config.toml".into(),
+            bytes: text.as_bytes().to_vec(),
+            exists: true,
+            mode: None,
+        })
+        .expect("grok compat toml")
+    }
+
+    #[test]
+    fn grok_compat_isolated_reads_nested_and_dotted_tables() {
+        assert!(!grok_compat_isolated(&grok_compat_doc(
+            "[compat.claude]\nskills = true\n"
+        )));
+        assert!(grok_compat_isolated(&grok_compat_doc(
+            "[compat.claude]\nhooks = false\n[compat.cursor]\nhooks = false\n"
+        )));
+        assert!(grok_compat_isolated(&grok_compat_doc(
+            "compat.claude.hooks = false\ncompat.cursor.hooks = false\n"
+        )));
+        assert!(grok_compat_isolated(&grok_compat_doc(
+            "[compat]\nclaude.hooks = false\ncursor.hooks = false\n"
+        )));
+        assert!(!grok_compat_isolated(&grok_compat_doc(
+            "[compat.claude]\nhooks = false\n[compat.cursor]\nhooks = true\n"
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_plan_writes_hooks_json_and_compat_and_omits_history_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = temp.path().join(".grok");
+        fs::create_dir_all(root_path.join("hooks")).unwrap();
+        fs::write(
+            root_path.join("hooks").join("cli-manager.json"),
+            "{\n  \"keep\": true\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root_path.join("config.toml"),
+            "# keep\n[compat.claude]\nhooks = true\nskills = true\n",
+        )
+        .unwrap();
+        let canonical = fs::canonicalize(&root_path).unwrap();
+        let root = ResolvedRoot {
+            configured: "~/.grok".to_string(),
+            requested: root_path,
+            canonical,
+            hash: "a".repeat(64),
+            existed: true,
+        };
+        let installation = installation_record_for_test(std::path::Path::new(
+            "/opt/cli-manager/cli-manager-ssh-agent",
+        ));
+
+        let (plans, _, conflict) =
+            plan_files(&root, Source::Grok, &installation, Some(true)).unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].before.role, "grokHooks");
+        assert_eq!(plans[1].before.role, "grokCompat");
+        assert!(!conflict);
+        let hooks = String::from_utf8(plans[0].after.clone()).unwrap();
+        assert!(hooks.contains("\"keep\": true"));
+        assert_eq!(hooks.matches("--source grok").count(), 11);
+        assert!(hooks.contains("PermissionRequest"));
+        let after_json = serde_json::from_slice(&plans[0].after).unwrap();
+        let expected = exact_commands(&installation, Source::Grok);
+        let (managed, after_conflict, _) =
+            inspect_json(&after_json, Source::Grok, &expected).unwrap();
+        assert_eq!(managed, 11);
+        assert!(!after_conflict);
+        let config = String::from_utf8(plans[1].after.clone()).unwrap();
+        assert!(config.contains("# keep"));
+        assert!(config.contains("skills = true"));
+        assert!(config.contains("hooks = false"));
+
+        let record = installation_record(Source::Grok, &root, &installation, &plans);
+        assert!(record.history_source_candidate.is_none());
+
+        let inspect_plans = plan_files(&root, Source::Grok, &installation, None)
+            .unwrap()
+            .0;
+        assert!(!grok_compat_isolated(
+            &parse_toml(&inspect_plans[1].before).unwrap()
+        ));
+        let after_toml = parse_toml(&FileState {
+            role: "grokCompat",
+            logical_path: inspect_plans[1].before.logical_path.clone(),
+            canonical_path: inspect_plans[1].before.canonical_path.clone(),
+            bytes: plans[1].after.clone(),
+            exists: true,
+            mode: None,
+        })
+        .unwrap();
+        assert!(grok_compat_isolated(&after_toml));
     }
 
     #[cfg(unix)]
@@ -1987,7 +2226,7 @@ mod tests {
                 "managedEntries": source.required_entries(),
                 "adapterVersion": 1,
                 "installedAt": 1,
-                "historySourceCandidate": (source != Source::Kimi).then(|| json!({
+                "historySourceCandidate": matches!(source, Source::Claude | Source::Codex).then(|| json!({
                     "source": source.as_str(),
                     "canonicalConfigRoot": canonical.to_string_lossy(),
                     "configRootHash": hash,

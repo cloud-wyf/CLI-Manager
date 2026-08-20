@@ -2,6 +2,12 @@
 
 ## [TEMP] - 2026-08-20
 
+### Grok Build SSH CLI/Hook 与本地历史删除
+
+- SSH 主机“CLI 集成”新增 Grok Build，支持 `$HOME/.grok` 默认根、项目级覆盖、非空有效覆盖根的 `GROK_HOME` 安全注入，以及远端 Hook 的检查、事务预览、安装和卸载；空根保留远端原生环境。Grok 仅作为 CLI/Hook source，远程历史继续只支持 Claude Code 与 Codex CLI。
+- SSH Agent 升级到 `0.1.10`、协议保持 `1.11`；远端规划 `hooks/cli-manager.json` 的 11 个 Grok Hook definition，并写入 `config.toml` 的 `compat.claude.hooks` / `compat.cursor.hooks = false` 隔离，不调用 Grok CLI doctor。Grok installation record 不生成 history candidate 或历史 metadata，旧 Agent 不支持 Grok 时显式返回真实错误。
+- 本地与 WSL 的 Grok 历史删除会备份 `updates.jsonl`、`summary.json` 与 `signals.json` 后移除整个会话目录；路径必须落在 Grok history home 内且不能是 home 本身，会话 ID 在删除和 `grok --resume` 前执行字母数字、`_`、`-` 白名单校验。失败不会声称成功。WSL UNC 用 `wsl.exe find` 发现 `updates.jsonl`，不回退宿主递归。历史根优先历史来源设置，其次 Hook 配置目录下的 `sessions`。
+
 ### Shell 选择器图标
 
 - CMD、Git Bash、Windows PowerShell、PowerShell 7 与 WSL 改为优先使用随应用打包的匹配图标，不再依赖运行时从可执行文件提取而出现通用图标或缺失；自定义 Shell 继续保留原生图标提取与通用兜底。

@@ -4,7 +4,7 @@
 
 Apply this contract when changing `cli-manager-ssh-agent`, shared SSH transport generation, one-shot Agent probes, Agent installation metadata, bridge framing, or the SSH Host CLI Integration status UI.
 
-The delivered scope includes explicit one-shot probe/install lifecycle, remote Claude/Codex/Kimi Hook configuration, the one-shot Hook runtime, Claude/Codex-only remote history/resume RPCs, and daemon-owned protocol `1.11` bridges per active SSH Host. Protocol 1.5 introduced read-only file RPCs; protocol 1.7 Git RPCs expose the full Git panel through a dedicated serialized Git lane, protocol 1.8 adds negotiated Diff generation options, protocol 1.9 adds bounded terminal image attachments outside project roots, protocol 1.10 generalizes attachment upload to arbitrary regular files, and protocol 1.11 adds session-bound Agent MCP/Skill diagnostics through `agentCapabilitiesV1`. Realtime/historical stats remain separate stages.
+The delivered scope includes explicit one-shot probe/install lifecycle, remote Claude/Codex/Kimi/Grok Hook configuration, the one-shot Hook runtime, Claude/Codex-only remote history/resume RPCs, and daemon-owned protocol `1.11` bridges per active SSH Host. Protocol 1.5 introduced read-only file RPCs; protocol 1.7 Git RPCs expose the full Git panel through a dedicated serialized Git lane, protocol 1.8 adds negotiated Diff generation options, protocol 1.9 adds bounded terminal image attachments outside project roots, protocol 1.10 generalizes attachment upload to arbitrary regular files, and protocol 1.11 adds session-bound Agent MCP/Skill diagnostics through `agentCapabilitiesV1`. Realtime/historical stats remain separate stages.
 
 ### Agent Release Identity
 
@@ -25,6 +25,7 @@ The delivered scope includes explicit one-shot probe/install lifecycle, remote C
   preserving the original safe basename. Agent `0.1.8` reports protocol `1.11` and
   advertises `agentCapabilitiesV1` for fixed-command, redacted MCP/Skill inspection and probes.
   Agent `0.1.9` keeps protocol `1.11` and adds the current Kimi Code TOML Hook adapter/runtime without adding Kimi history support.
+  Agent `0.1.10` keeps protocol `1.11` and adds the Grok Build JSON Hook adapter (`hooks/cli-manager.json` plus `config.toml` cross-tool isolation) without adding Grok remote history support.
 - The independent Agent release tag is exactly `ssh-agent-v<agent-version>`. Its signed manifest
   must carry that Agent version and point only to assets on that same tag.
 - Independent Agent releases are GitHub prereleases with `make_latest: false`. The desktop

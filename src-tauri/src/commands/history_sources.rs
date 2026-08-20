@@ -231,7 +231,13 @@ const SOURCES: &[SourceSpec] = &[
         default_label: "Grok Build",
         aliases: &[],
         location: SESSION_ROOT,
-        capabilities: NATIVE_READONLY_FILE,
+        capabilities: CapabilitySpec {
+            usage: "supported",
+            resume: "supported",
+            delete: "supported",
+            realtime_stats: "supported",
+            ..NATIVE_READONLY_FILE
+        },
         default_leaf: ".grok",
     },
     SourceSpec {
@@ -587,6 +593,9 @@ mod tests {
         let grok = SOURCES.iter().find(|spec| spec.id == "grok").unwrap();
         let candidate = default_candidate_path_from_home(grok, Path::new(r"C:\Users\tester"));
         assert_eq!(candidate, PathBuf::from(r"C:\Users\tester\.grok\sessions"));
+        assert_eq!(grok.capabilities.delete, "supported");
+        assert_eq!(grok.capabilities.realtime_stats, "supported");
+        assert_eq!(grok.capabilities.resume, "supported");
     }
 
     #[test]
