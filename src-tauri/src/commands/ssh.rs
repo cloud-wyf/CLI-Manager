@@ -2072,8 +2072,7 @@ mod tests {
     use super::{
         available_release_preview, build_agent_install_script, build_agent_management_script,
         build_agent_probe_script, effective_ssh_user_command, hook_request, host_key_fingerprint,
-        install_action,
-        is_authenticated_log, parse_agent_environment, parse_agent_operation,
+        install_action, is_authenticated_log, parse_agent_environment, parse_agent_operation,
         parse_agent_probe_stdout, parse_effective_ssh_user, posix_quote, read_bounded,
         result_from_agent_report, ssh_password_account, ssh_probe_command,
         validate_agent_hook_report, validate_remote_path, validate_spec, AgentDoctorProbe,

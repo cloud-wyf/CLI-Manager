@@ -6,6 +6,7 @@
 
 - SSH 主机「CLI 集成」打开时自动检查 `cli-manager-ssh-agent` 的签名发布版本（优先安装包内置，不建立 SSH 连接）。若已记录或最近检测到的远端版本更旧，展示可用新版本，并可通过「更新」进入现有预览确认后升级。
 - 解析本机 Codex 启动器时跳过 cc-connect 托管 wrapper 目录，避免 PATH 里的 wrapper 把自己当成真实 `codex`。
+- 修正 SSH Agent 新版本检测相关 Rust 测试导入的格式，恢复后端格式检查通过。
 
 ### Shell 选择器图标
 
