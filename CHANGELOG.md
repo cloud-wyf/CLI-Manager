@@ -6,11 +6,11 @@
 
 - SSH 主机“CLI 集成”新增 Grok Build，支持 `$HOME/.grok` 默认根、项目级覆盖、非空有效覆盖根的 `GROK_HOME` 安全注入，以及远端 Hook 的检查、事务预览、安装和卸载；空根保留远端原生环境。Grok 仅作为 CLI/Hook source，远程历史继续只支持 Claude Code 与 Codex CLI。
 - SSH Agent 升级到 `0.1.10`、协议保持 `1.11`；远端规划 `hooks/cli-manager.json` 的 11 个 Grok Hook definition，并写入 `config.toml` 的 `compat.claude.hooks` / `compat.cursor.hooks = false` 隔离，不调用 Grok CLI doctor。Grok installation record 不生成 history candidate 或历史 metadata，旧 Agent 不支持 Grok 时显式返回真实错误。
-- 本地与 WSL 的 Grok 历史删除会备份 `updates.jsonl`、`summary.json` 与 `signals.json` 后移除整个会话目录；路径必须落在 Grok history home 内且不能是 home 本身，会话 ID 在删除和 `grok --resume` 前执行字母数字、`_`、`-` 白名单校验。失败不会声称成功。WSL UNC 用 `wsl.exe find` 发现 `updates.jsonl`，不回退宿主递归。历史根优先历史来源设置，其次 Hook 配置目录下的 `sessions`。
+- 本地与 WSL 的 Grok 历史删除会备份 `updates.jsonl`、`summary.json` 与 `signals.json` 后移除整个会话目录；路径必须落在 Grok history home 内且不能是 home 本身，会话 ID 在删除和 `grok --resume` 前执行字母数字、`_`、`-` 白名单校验。失败不会声称成功。WSL UNC 用 `wsl.exe find` 发现 `updates.jsonl`，不回退宿主递归；命中必须带 workspace 与 session 两层目录，不用宿主 `Path` 解析 Linux 路径。历史根优先历史来源设置，其次 Hook 配置目录下的 `sessions`。
 
-### cc-connect Codex 启动器解析
+### cc-connect 本机 Codex 启动器 PATH 解析
 
-- 解析本机 Codex 启动器时跳过 cc-connect 托管 wrapper 目录，避免 PATH 里的 wrapper 把自己当成真实 `codex`。
+- 本机解析 `codex` / `codex.exe` 时跳过 cc-connect 托管的 `remote-manager/bin`，避免 PATH 里的 wrapper 把自己当成真实启动器；Windows 仍按 `.exe/.cmd/.bat/.ps1` 在其余 PATH 项中查找。
 
 ### Shell 选择器图标
 
