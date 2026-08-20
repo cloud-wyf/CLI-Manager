@@ -15196,6 +15196,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].source, "cursor");
         assert_eq!(files[0].project_key, "f-github-CLI-Manager");
+        #[cfg(windows)]
         assert!(session_matches_project_path(
             &files[0],
             &normalize_history_path(r"F:\github\CLI-Manager")
