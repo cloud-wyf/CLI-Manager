@@ -2275,7 +2275,7 @@ mod tests {
         let canonical = fs::canonicalize(&root_path).unwrap();
         let root = ResolvedRoot {
             configured: "~/.grok".to_string(),
-            requested: root_path,
+            requested: root_path.clone(),
             canonical,
             hash: "a".repeat(64),
             existed: true,
