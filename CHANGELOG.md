@@ -1,6 +1,25 @@
 # Changelog
 
-## [V1.3.8] - 2026-08-20
+## [V1.3.8] - 2026-08-21
+
+### Grok Build SSH CLI/Hook 与本地历史删除
+
+- SSH 主机“CLI 集成”新增 Grok Build，支持 `$HOME/.grok` 默认根、项目级覆盖、非空有效覆盖根的 `GROK_HOME` 安全注入，以及远端 Hook 的检查、事务预览、安装和卸载；空根保留远端原生环境。Grok 仅作为 CLI/Hook source，远程历史继续只支持 Claude Code 与 Codex CLI。
+- SSH Agent 升级到 `0.1.10`、协议保持 `1.11`；远端规划 `hooks/cli-manager.json` 的 11 个 Grok Hook definition，并写入 `config.toml` 的 `compat.claude.hooks` / `compat.cursor.hooks = false` 隔离，不调用 Grok CLI doctor。Grok installation record 不生成 history candidate 或历史 metadata，旧 Agent 不支持 Grok 时显式返回真实错误。
+- 本地与 WSL 的 Grok 历史删除会备份 `updates.jsonl`、`summary.json` 与 `signals.json` 后移除整个会话目录；路径必须落在 Grok history home 内且不能是 home 本身，会话 ID 在删除和 `grok --resume` 前执行字母数字、`_`、`-` 白名单校验。失败不会声称成功。WSL UNC 用 `wsl.exe find` 发现 `updates.jsonl`，不回退宿主递归；命中必须带 workspace 与 session 两层目录，不用宿主 `Path` 解析 Linux 路径。历史根优先历史来源设置，其次 Hook 配置目录下的 `sessions`。
+
+### Grok Build SSH Hook 配置保护
+
+- 修复 SSH Agent 安装 Grok Hook 时覆盖 Claude/Cursor 兼容 Hook 配置后无法恢复的问题：仅对实际需要隔离的值写入带当前 installation id 的原始状态 marker；卸载只还原同一安装实例仍持有的 `true` 或缺失值。用户预先关闭的值、另一安装实例的标记、用户后续手动修改、其他兼容配置和注释均保持不变。
+
+### SSH Agent 新版本检测
+
+- SSH 主机「CLI 集成」打开时自动检查 `cli-manager-ssh-agent` 的签名发布版本（优先安装包内置，不建立 SSH 连接）。若已记录或最近检测到的远端版本更旧，展示可用新版本，并可通过「更新」进入现有预览确认后升级。
+- 修正 SSH Agent 新版本检测相关 Rust 测试导入的格式，恢复后端格式检查通过。
+
+### cc-connect 本机 Codex 启动器 PATH 解析
+
+- 本机解析 `codex` / `codex.exe` 时跳过 cc-connect 托管的 `remote-manager/bin`，避免 PATH 里的 wrapper 把自己当成真实启动器；Windows 仍按 `.exe/.cmd/.bat/.ps1` 在其余 PATH 项中查找。
 
 ### 供应商与终端路径修复
 
@@ -15,13 +34,10 @@
 
 - 编辑终端的环境变量字段新增 JSON 格式悬浮示例；移除与悬浮卡片重复的浏览器原生提示，示例区支持一键复制；输入区改为默认 3 行、可纵向调整的等宽 JSON 文本域，并沿用项目维护弹框的主题样式与中英文文案。
 
-## [TEMP] - 2026-08-20
+### 首次升级启动
 
-### SSH Agent 新版本检测
-
-- SSH 主机「CLI 集成」打开时自动检查 `cli-manager-ssh-agent` 的签名发布版本（优先安装包内置，不建立 SSH 连接）。若已记录或最近检测到的远端版本更旧，展示可用新版本，并可通过「更新」进入现有预览确认后升级。
-- 解析本机 Codex 启动器时跳过 cc-connect 托管 wrapper 目录，避免 PATH 里的 wrapper 把自己当成真实 `codex`。
-- 修正 SSH Agent 新版本检测相关 Rust 测试导入的格式，恢复后端格式检查通过。
+- 修复本地用量记录较多时，数据库迁移超过 15 秒就被误判为启动失败的问题；不可取消的迁移现在保持加载状态，并明确提示首次升级可能需要数分钟，避免重复重试导致迁移反复中断。
+- 修复百万级历史用量数据库升级时 migration 32 在启动事务中执行全表项目路径回填、可能阻塞数十分钟的问题；兼容层保持原 migration checksum，并把历史回填改为数据库加载后的单飞小批次后台任务。主界面可先启动，回填可中断、可重启续跑，重名项目与 SSH 项目不会被错误映射。
 
 ### Shell 选择器图标
 
