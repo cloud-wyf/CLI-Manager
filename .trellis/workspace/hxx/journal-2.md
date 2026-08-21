@@ -1101,3 +1101,24 @@ Reviewed PR #220 against current Kimi Code, fixed wire usage parsing, append-onl
 ### Status
 
 [OK] **Completed**
+
+
+## Session 94: Fix provider dialog layering and terminal file navigation
+
+**Date**: 2026-08-21
+**Task**: Fix provider dialog layering and terminal file navigation
+**Branch**: `master`
+
+### Summary
+
+Raised the provider delete confirmation above its parent modal and normalized slash-form Windows file paths at the Explorer boundary, with regression coverage and V1.3.8 release records.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `575f903e` | (see git log) |
+
+### Status
+
+[OK] **Completed**
