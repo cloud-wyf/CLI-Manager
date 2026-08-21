@@ -93,7 +93,7 @@ function ignoreProviderError(promise: Promise<unknown>): void {
 
 export function NativeProviderSettingsPage({ searchValue }: NativeProviderSettingsPageProps) {
   const { t } = useI18n();
-  const { confirm, confirmDialog } = useAppConfirm();
+  const { confirm, confirmDialog } = useAppConfirm({ zIndex: 220 });
   const [appType, setAppType] = useState<NativeProviderAppType>(pageCache.appType);
   const [surface, setSurface] = useState<NativeProviderSettingsSurface>(pageCache.surface);
   const [importOpened, setImportOpened] = useState(false);
