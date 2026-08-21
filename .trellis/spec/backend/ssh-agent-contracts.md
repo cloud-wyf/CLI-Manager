@@ -86,6 +86,11 @@ pub async fn ssh_agent_probe(
     agent_path: Option<String>,
 ) -> Result<SshAgentProbeResult, String>;
 
+pub async fn ssh_agent_available_release(
+    manifest_url: Option<String>,
+    current_version: Option<String>,
+    allow_http: bool,
+) -> Result<SshAgentAvailableRelease, String>;
 pub async fn ssh_agent_install_preview(...) -> Result<SshAgentInstallPreview, String>;
 pub async fn ssh_agent_install(...) -> Result<SshAgentOperationResult, String>;
 pub async fn ssh_agent_rollback(...) -> Result<SshAgentOperationResult, String>;
@@ -112,6 +117,8 @@ pub async fn ssh_db_record_history_source(input: SshHistorySourceInput) -> Resul
 ```
 
 `SshAgentProbeResult` contains `status`, stable `code`, sanitized executable/version/protocol/target metadata, `supported`, and an ephemeral diagnostic `detail`. Only metadata fields enter `ssh_agent_installations`; `detail` is never persisted.
+
+`ssh_agent_available_release` resolves the same bundled-first signed Agent manifest as install preview. It must not accept an SSH spec and must not open an SSH connection. The CLI Integration UI may show an Update action only when `action == "upgrade"`; pressing Update still runs `ssh_agent_install_preview` then `ssh_agent_install`. Check failures are shown as real errors and must not be reported as up to date.
 
 ### Agent CLI and bridge
 
