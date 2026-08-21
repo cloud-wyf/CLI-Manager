@@ -588,6 +588,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn grok_history_capabilities_include_delete_resume_and_realtime_stats() {
         let grok = SOURCES.iter().find(|spec| spec.id == "grok").unwrap();

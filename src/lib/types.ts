@@ -136,6 +136,18 @@ export interface SshAgentInstallPreview {
   distributionSource: "bundled" | "remote";
 }
 
+export interface SshAgentAvailableRelease {
+  action: "install" | "upgrade" | "reinstall" | "downgrade";
+  manifestUrl: string;
+  channel: string;
+  version: string;
+  protocolMin: number;
+  protocolMax: number;
+  publishedAt: string;
+  currentVersion: string;
+  distributionSource: "bundled" | "remote";
+}
+
 export interface SshAgentOperationResult {
   action: "installed" | "updated" | "rolledBack" | "uninstalled" | "purged";
   installationId: string;
