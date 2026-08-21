@@ -2620,7 +2620,7 @@ fn resolve_program_from_path(
     Err("handoff_agent_unavailable".to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn resolve_codex_launcher_from_path(
     wrapper_dir: &Path,
     path_value: impl AsRef<std::ffi::OsStr>,
