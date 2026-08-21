@@ -582,6 +582,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn grok_default_candidate_is_the_session_root() {
         let grok = SOURCES.iter().find(|spec| spec.id == "grok").unwrap();

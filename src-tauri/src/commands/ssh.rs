@@ -929,6 +929,48 @@ fn validated_install_root(
     Ok(root.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshAgentAvailableRelease {
+    action: String,
+    manifest_url: String,
+    channel: String,
+    version: String,
+    protocol_min: u16,
+    protocol_max: u16,
+    published_at: String,
+    current_version: String,
+    distribution_source: String,
+}
+
+fn available_release_preview(
+    manifest_url: String,
+    channel: String,
+    version: String,
+    protocol_min: u16,
+    protocol_max: u16,
+    published_at: String,
+    distribution_source: String,
+    current_version: Option<&str>,
+) -> SshAgentAvailableRelease {
+    let current = current_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    SshAgentAvailableRelease {
+        action: install_action(current_version, &version),
+        manifest_url,
+        channel,
+        version,
+        protocol_min,
+        protocol_max,
+        published_at,
+        current_version: current,
+        distribution_source,
+    }
+}
+
 fn install_action(current_version: Option<&str>, incoming_version: &str) -> String {
     let Some(current) = current_version
         .map(str::trim)
@@ -1653,6 +1695,33 @@ pub async fn ssh_agent_probe(
 }
 
 #[tauri::command]
+pub async fn ssh_agent_available_release(
+    app: AppHandle,
+    manifest_url: Option<String>,
+    current_version: Option<String>,
+    allow_http: bool,
+) -> Result<SshAgentAvailableRelease, String> {
+    let bundled_root = bundled_agent_release_dir(&app)?;
+    let release = fetch_verified_release(
+        manifest_url.as_deref(),
+        allow_http,
+        Some(bundled_root.as_path()),
+    )
+    .await?;
+    let distribution_source = release.distribution_source().to_string();
+    Ok(available_release_preview(
+        release.manifest_url,
+        release.manifest.channel,
+        release.manifest.version,
+        release.manifest.protocol_min,
+        release.manifest.protocol_max,
+        release.manifest.published_at,
+        distribution_source,
+        current_version.as_deref(),
+    ))
+}
+
+#[tauri::command]
 pub async fn ssh_agent_install_preview(
     app: AppHandle,
     host_id: String,
@@ -2001,9 +2070,9 @@ pub async fn ssh_list_directories(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_install_script, build_agent_management_script, build_agent_probe_script,
-        effective_ssh_user_command, hook_request, host_key_fingerprint, install_action,
-        is_authenticated_log, parse_agent_environment, parse_agent_operation,
+        available_release_preview, build_agent_install_script, build_agent_management_script,
+        build_agent_probe_script, effective_ssh_user_command, hook_request, host_key_fingerprint,
+        install_action, is_authenticated_log, parse_agent_environment, parse_agent_operation,
         parse_agent_probe_stdout, parse_effective_ssh_user, posix_quote, read_bounded,
         result_from_agent_report, ssh_password_account, ssh_probe_command,
         validate_agent_hook_report, validate_remote_path, validate_spec, AgentDoctorProbe,
@@ -2178,6 +2247,45 @@ mod tests {
         assert_eq!(install_action(Some("1.0.0"), "1.0.1"), "upgrade");
         assert_eq!(install_action(Some("1.0.0"), "1.0.0"), "reinstall");
         assert_eq!(install_action(Some("2.0.0"), "1.0.0"), "downgrade");
+    }
+
+    fn available_release_sample(
+        version: &str,
+        current_version: Option<&str>,
+    ) -> super::SshAgentAvailableRelease {
+        available_release_preview(
+            "https://example.com/ssh-agent-release-manifest.json".into(),
+            "stable".into(),
+            version.into(),
+            1,
+            11,
+            "2026-08-19T00:00:00Z".into(),
+            "bundled".into(),
+            current_version,
+        )
+    }
+
+    #[test]
+    fn available_release_marks_upgrade_without_remote_target() {
+        let preview = available_release_sample("0.1.9", Some("0.1.7"));
+        assert_eq!(preview.action, "upgrade");
+        assert_eq!(preview.version, "0.1.9");
+        assert_eq!(preview.current_version, "0.1.7");
+        assert_eq!(preview.distribution_source, "bundled");
+    }
+
+    #[test]
+    fn available_release_treats_missing_current_as_install() {
+        let preview = available_release_sample("0.1.9", None);
+        assert_eq!(preview.action, "install");
+        assert_eq!(preview.current_version, "");
+    }
+
+    #[test]
+    fn available_release_does_not_prompt_downgrade_as_upgrade() {
+        let preview = available_release_sample("0.1.8", Some("0.1.9"));
+        assert_eq!(preview.action, "downgrade");
+        assert_ne!(preview.action, "upgrade");
     }
 
     #[test]

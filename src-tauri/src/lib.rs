@@ -1448,6 +1448,7 @@ pub fn run() {
             commands::ssh::ssh_resolve_user,
             commands::ssh::ssh_test_connection,
             commands::ssh::ssh_agent_probe,
+            commands::ssh::ssh_agent_available_release,
             commands::ssh::ssh_agent_install_preview,
             commands::ssh::ssh_agent_install,
             commands::ssh::ssh_agent_rollback,
