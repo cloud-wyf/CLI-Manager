@@ -1,5 +1,11 @@
 # Changelog
 
+## [V1.3.8] - 2026-08-21
+
+### Grok Build SSH Hook 配置保护
+
+- 修复 SSH Agent 安装 Grok Hook 时覆盖 Claude/Cursor 兼容 Hook 配置后无法恢复的问题：仅对实际需要隔离的值写入带当前 installation id 的原始状态 marker；卸载只还原同一安装实例仍持有的 `true` 或缺失值。用户预先关闭的值、另一安装实例的标记、用户后续手动修改、其他兼容配置和注释均保持不变。
+
 ## [TEMP] - 2026-08-20
 
 ### Grok Build SSH CLI/Hook 与本地历史删除

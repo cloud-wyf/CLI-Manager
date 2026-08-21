@@ -1064,10 +1064,173 @@ fn uninstall_codex_feature(
     Ok(())
 }
 
-fn apply_grok_compat_isolation(document: &mut DocumentMut) {
-    for vendor in ["claude", "cursor"] {
-        document["compat"][vendor]["hooks"] = value(false);
+fn grok_compat_marker(
+    installation_id: &str,
+    previous: &str,
+    compat_created: bool,
+    vendor_created: bool,
+) -> String {
+    format!(
+        " # cli-manager-ssh-agent installation={installation_id} previous={previous} compatCreated={compat_created} vendorCreated={vendor_created}"
+    )
+}
+
+fn parse_grok_compat_marker(
+    suffix: &str,
+    installation_id: &str,
+) -> Option<(String, bool, bool, String)> {
+    let marker = "# cli-manager-ssh-agent ";
+    let (original_suffix, fields) = suffix.rsplit_once(marker)?;
+    let mut installation = None;
+    let mut previous = None;
+    let mut compat_created = None;
+    let mut vendor_created = None;
+    for field in fields.split_whitespace() {
+        let (key, value) = field.split_once('=')?;
+        match key {
+            "installation" => installation = Some(value),
+            "previous" => previous = Some(value),
+            "compatCreated" => {
+                compat_created = match value {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => return None,
+                }
+            }
+            "vendorCreated" => {
+                vendor_created = match value {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => return None,
+                }
+            }
+            _ => {}
+        }
     }
+    if installation != Some(installation_id) {
+        return None;
+    }
+    Some((
+        previous?.to_string(),
+        compat_created?,
+        vendor_created?,
+        original_suffix.to_string(),
+    ))
+}
+
+fn install_grok_compat_hooks(
+    document: &mut DocumentMut,
+    installation_id: &str,
+    vendor: &str,
+) -> Result<(), String> {
+    let compat_created = !document.contains_key("compat");
+    if compat_created {
+        document["compat"] = Item::Table(toml_edit::Table::new());
+    }
+    let compat = document["compat"]
+        .as_table_like_mut()
+        .ok_or_else(|| "hook_config_toml_compat_invalid".to_string())?;
+    let vendor_created = !compat.contains_key(vendor);
+    if vendor_created {
+        compat.insert(vendor, Item::Table(toml_edit::Table::new()));
+    }
+    let vendor_config = compat
+        .get_mut(vendor)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| "hook_config_toml_compat_vendor_invalid".to_string())?;
+    let (previous, prefix, suffix) = match vendor_config.get("hooks") {
+        None => ("missing", String::new(), String::new()),
+        Some(item) if item.as_bool() == Some(true) => {
+            let (prefix, suffix) = item_decor(item);
+            ("true", prefix, suffix)
+        }
+        Some(item) if item.as_bool() == Some(false) => return Ok(()),
+        Some(_) => return Err("hook_config_toml_compat_hooks_invalid".to_string()),
+    };
+    let mut owned = value(false);
+    let decor = owned.as_value_mut().expect("toml bool value").decor_mut();
+    decor.set_prefix(prefix);
+    decor.set_suffix(format!(
+        "{suffix}{}",
+        grok_compat_marker(installation_id, previous, compat_created, vendor_created)
+    ));
+    vendor_config.insert("hooks", owned);
+    Ok(())
+}
+
+fn install_grok_compat_isolation(
+    document: &mut DocumentMut,
+    installation_id: &str,
+) -> Result<(), String> {
+    for vendor in ["claude", "cursor"] {
+        install_grok_compat_hooks(document, installation_id, vendor)?;
+    }
+    Ok(())
+}
+
+fn uninstall_grok_compat_hooks(
+    document: &mut DocumentMut,
+    installation_id: &str,
+    vendor: &str,
+) -> Result<bool, String> {
+    let Some(compat) = document.get_mut("compat").and_then(Item::as_table_like_mut) else {
+        return Ok(false);
+    };
+    let Some(vendor_config) = compat.get_mut(vendor).and_then(Item::as_table_like_mut) else {
+        return Ok(false);
+    };
+    let Some(item) = vendor_config.get("hooks") else {
+        return Ok(false);
+    };
+    if item.as_bool() != Some(false) {
+        return Ok(false);
+    }
+    let prefix = item_decor(item).0;
+    let Some((previous, compat_created, vendor_created, original_suffix)) =
+        parse_grok_compat_marker(&marker_suffix(item), installation_id)
+    else {
+        return Ok(false);
+    };
+    match previous.as_str() {
+        "true" => {
+            let mut restored = value(true);
+            let decor = restored
+                .as_value_mut()
+                .expect("toml bool value")
+                .decor_mut();
+            decor.set_prefix(prefix);
+            decor.set_suffix(original_suffix);
+            vendor_config.insert("hooks", restored);
+        }
+        "missing" => {
+            vendor_config.remove("hooks");
+        }
+        _ => return Err("hook_config_toml_marker_invalid".to_string()),
+    }
+    let remove_vendor = vendor_created && vendor_config.is_empty();
+    if remove_vendor {
+        compat.remove(vendor);
+    }
+    Ok(compat_created)
+}
+
+fn uninstall_grok_compat_isolation(
+    document: &mut DocumentMut,
+    installation_id: &str,
+) -> Result<(), String> {
+    let mut compat_created = false;
+    for vendor in ["claude", "cursor"] {
+        compat_created |= uninstall_grok_compat_hooks(document, installation_id, vendor)?;
+    }
+    if compat_created
+        && document
+            .get("compat")
+            .and_then(Item::as_table_like)
+            .is_some_and(|compat| compat.is_empty())
+    {
+        document.remove("compat");
+    }
+    Ok(())
 }
 
 fn grok_compat_hooks_disabled(document: &DocumentMut, vendor: &str) -> bool {
@@ -1166,7 +1329,11 @@ fn plan_files(
         let mut document = parse_toml(&toml_state)?;
         let toml_after = match operation {
             Some(true) => {
-                apply_grok_compat_isolation(&mut document);
+                install_grok_compat_isolation(&mut document, &installation.installation_id)?;
+                document.to_string().into_bytes()
+            }
+            Some(false) => {
+                uninstall_grok_compat_isolation(&mut document, &installation.installation_id)?;
                 document.to_string().into_bytes()
             }
             _ if toml_state.exists => toml_state.bytes.clone(),
@@ -1866,9 +2033,10 @@ pub fn apply(request: HookConfigRequest, install: bool) -> Result<HookConfigRepo
 mod tests {
     use super::{
         add_exact_hooks, apply_transaction, feature_marker, fingerprint, grok_compat_isolated,
-        hook_command, inspect_json, install_codex_feature, parse_owned_marker, parse_toml,
-        recover_transaction, remove_exact_hooks, transaction_dir, uninstall_codex_feature,
-        FileState, PlannedFile, Source, TransactionFile, TransactionJournal,
+        hook_command, inspect_json, install_codex_feature, install_grok_compat_isolation,
+        parse_owned_marker, parse_toml, recover_transaction, remove_exact_hooks, transaction_dir,
+        uninstall_codex_feature, uninstall_grok_compat_isolation, FileState, PlannedFile, Source,
+        TransactionFile, TransactionJournal,
     };
     #[cfg(unix)]
     use super::{
@@ -1994,6 +2162,100 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn grok_compat_uninstall_restores_owned_values_and_preserves_user_values() {
+        let mut document = grok_compat_doc(
+            "# keep\n[compat.claude]\nhooks = true # claude user comment\nskills = true\n[compat.cursor]\nhooks = false # cursor user choice\n",
+        );
+
+        install_grok_compat_isolation(&mut document, "installation-1").unwrap();
+        let installed = document.to_string();
+        assert!(grok_compat_isolated(&document));
+        assert!(installed.contains("hooks = false # claude user comment # cli-manager-ssh-agent"));
+        assert!(installed.contains("hooks = false # cursor user choice"));
+        assert_eq!(installed.matches("cli-manager-ssh-agent").count(), 1);
+
+        uninstall_grok_compat_isolation(&mut document, "installation-1").unwrap();
+        let restored = document.to_string();
+        assert!(restored.contains("hooks = true # claude user comment"));
+        assert!(restored.contains("hooks = false # cursor user choice"));
+        assert!(!restored.contains("cli-manager-ssh-agent"));
+        assert!(restored.contains("skills = true"));
+    }
+
+    #[test]
+    fn grok_compat_uninstall_removes_only_agent_created_tables() {
+        let mut document = grok_compat_doc("# keep\n[other]\nvalue = true\n");
+
+        install_grok_compat_isolation(&mut document, "installation-1").unwrap();
+        assert!(grok_compat_isolated(&document));
+        assert!(document.contains_key("compat"));
+
+        uninstall_grok_compat_isolation(&mut document, "installation-1").unwrap();
+        assert!(!document.contains_key("compat"));
+        let restored = document.to_string();
+        assert!(restored.contains("# keep"));
+        assert!(restored.contains("[other]"));
+        assert!(restored.contains("value = true"));
+    }
+
+    #[test]
+    fn grok_compat_uninstall_respects_other_installations_and_user_changes() {
+        let mut document =
+            grok_compat_doc("[compat.claude]\nhooks = true\n[compat.cursor]\nhooks = true\n");
+        install_grok_compat_isolation(&mut document, "installation-1").unwrap();
+
+        uninstall_grok_compat_isolation(&mut document, "installation-2").unwrap();
+        assert!(grok_compat_isolated(&document));
+        assert!(document.to_string().contains("installation=installation-1"));
+
+        document["compat"]["claude"]["hooks"] = toml_edit::value(true);
+        uninstall_grok_compat_isolation(&mut document, "installation-1").unwrap();
+        assert_eq!(document["compat"]["claude"]["hooks"].as_bool(), Some(true));
+        assert_eq!(document["compat"]["cursor"]["hooks"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn grok_compat_already_isolated_without_marker_remains_unchanged() {
+        let original =
+            "[compat.claude]\nhooks = false # user\n[compat.cursor]\nhooks = false # user\n";
+        let mut document = grok_compat_doc(original);
+
+        install_grok_compat_isolation(&mut document, "installation-1").unwrap();
+        uninstall_grok_compat_isolation(&mut document, "installation-1").unwrap();
+
+        assert_eq!(document.to_string(), original);
+    }
+
+    #[test]
+    fn grok_compat_uninstall_ignores_incomplete_markers() {
+        let original =
+            "[compat.claude]\nhooks = false # cli-manager-ssh-agent installation=installation-1\n";
+        let mut document = grok_compat_doc(original);
+
+        uninstall_grok_compat_isolation(&mut document, "installation-1").unwrap();
+
+        assert_eq!(document.to_string(), original);
+    }
+
+    #[test]
+    fn grok_compat_install_and_uninstall_preserve_supported_dotted_forms() {
+        for original in [
+            "compat.claude.hooks = true\ncompat.cursor.hooks = true\n",
+            "[compat]\nclaude.hooks = true\ncursor.hooks = true\n",
+        ] {
+            let mut document = grok_compat_doc(original);
+            install_grok_compat_isolation(&mut document, "installation-1").unwrap();
+            assert!(grok_compat_isolated(&document));
+
+            uninstall_grok_compat_isolation(&mut document, "installation-1").unwrap();
+            assert!(!grok_compat_isolated(&document));
+            assert_eq!(document["compat"]["claude"]["hooks"].as_bool(), Some(true));
+            assert_eq!(document["compat"]["cursor"]["hooks"].as_bool(), Some(true));
+            assert!(!document.to_string().contains("cli-manager-ssh-agent"));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn grok_plan_writes_hooks_json_and_compat_and_omits_history_candidate() {
@@ -2062,6 +2324,15 @@ mod tests {
         })
         .unwrap();
         assert!(grok_compat_isolated(&after_toml));
+
+        fs::write(root_path.join("config.toml"), &plans[1].after).unwrap();
+        let uninstall_plans = plan_files(&root, Source::Grok, &installation, Some(false))
+            .unwrap()
+            .0;
+        let restored = String::from_utf8(uninstall_plans[1].after.clone()).unwrap();
+        assert!(restored.contains("hooks = true"));
+        assert!(restored.contains("skills = true"));
+        assert!(!restored.contains("cli-manager-ssh-agent"));
     }
 
     #[cfg(unix)]
