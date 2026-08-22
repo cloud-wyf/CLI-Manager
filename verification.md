@@ -1,3 +1,26 @@
+# OSC 52 本机剪贴板验证（2026-08-17）
+
+## 根因与发现清单
+
+- 根因位于宿主终端 OSC / 鼠标边界：PTY 已转发 OSC 52，前端只处理颜色查询，不写入 Tauri 剪贴板。远端 GUI/`xclip` 写不到 Windows。修复落在 `terminalOscParse` + `useTerminalOsc` + `useTerminalDisplay` + `XTermTerminal`。
+- 触点：`src/lib/terminalOscParse.ts`、`src/hooks/useTerminalOsc.ts`、`src/hooks/useTerminalDisplay.ts`、`src/components/XTermTerminal.tsx`、`src/App.tsx`、`src/terminal/browser/TerminalMouseInteraction.ts`、`src/stores/settingsStore.ts`、`src/lib/syncSettings.ts`、`src/lib/i18n.ts`、`ShortcutSettingsPage.tsx`、`.trellis/spec/backend/terminal-osc-color-contracts.md`。
+- 确认无关：Rust `osc_color.rs` 仍放过非 10/11 OSC；`systemClipboard.ts` 复用；不改 PTY ACK / daemon 分帧。
+- 场景：live 写剪贴板；replay/reset 不写；query 回包；设置关闭；普通拖选 vs Alt 交给 TUI；`Ctrl+Shift+C` 阻止检查元素。
+
+## 验证结果
+
+- `node --test scripts/terminalOsc52.test.mjs scripts/terminalOsc.test.mjs scripts/terminalMouseInteraction.test.mjs`：26 项通过。
+- `DISPLAY=:11 bash scripts/terminalOsc52.clipboard.e2e.sh`：live / tmux / replay 三项本机 X11 剪贴板 e2e 通过。
+- `npx tsc --noEmit`、`git diff --check`：通过。
+- 未在 Windows Tauri 窗口对 Grok 做端到端手测。
+
+## 未覆盖
+
+- Tauri `clipboard-manager` 插件路径依赖桌面 WebView；此处用同一 hook + 本机 `xclip` 验证解码与写剪贴板语义。
+- Chromium 检查元素在部分 WebView 版本仍可能有独立绑定，需在 `tauri dev` 下确认 `preventDefault` 生效。
+
+---
+
 # SSH NVM Codex 启动环境修复验证（2026-07-28）
 
 ## 根因与发现清单
@@ -941,3 +964,42 @@
 - `cargo test commands::cc_connect::tests --lib`：48 项通过。
 - `cargo fmt --all -- --check`、`git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
 - 用户已完成真实远程托管消息冒烟，确认问题解决。
+
+## 大型用量数据库首次升级启动修复（2026-08-14）
+
+### 根因与发现清单
+
+- 根因位于前端启动监控与 SQL 迁移的异步边界：上游迁移 27 会把旧 `request_logs` 全量写入 `usage_records`；当前环境有 1,398,185 条记录、主数据库约 1.2 GB，迁移超过固定 15 秒后仍在正常执行，但前端把“耗时较长”错误转换为 `startup_timeout:stores`，重试会重新加载 WebView 并中断迁移。
+- 修改 `src/App.tsx`：15 秒阈值只切换为长时间加载提示，不再制造伪启动错误；真实 rejected promise 仍由既有初始化错误页处理。会话 Store 与主数据库拆为独立启动阶段，便于界面和日志准确定位。
+- 修改 `src/lib/i18n.ts`：补齐中文和英文的会话恢复、数据库升级及长时间初始化提示。
+- 新增 `scripts/appStartupLongMigration.test.mjs`：锁定长迁移不得进入失败页、数据库阶段和双语提示必须接入真实启动界面。
+- 已确认未修改 SQLx 迁移 25～29 的版本、SQL 或校验和，未删除、裁剪或重写用户用量记录；项目加载、同步功能、会话恢复及真实启动异常处理保持原流程。
+- GitNexus 工具当前未暴露；codebase-memory 对 `runStartupStage` 的影响分析覆盖全局 `App` 启动链路并判定为 CRITICAL，已结合启动日志、SQLite 迁移表、源码和 Git diff 复核。
+
+### 验证结果
+
+- `node scripts/appStartupLongMigration.test.mjs`：2 项通过。
+- `npx tsc --noEmit`：通过。
+- `npm run build`：通过，完成 6822 个模块转换。
+- `git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
+- 未在用户正在使用的 1.2 GB 数据库上启动新包，以免关闭或干扰现有 CLI-Manager；安装包首次运行仍需等待一次性迁移完成，后续启动不再重复迁移。
+
+## 百万级项目路径迁移后台化（2026-08-21）
+
+### 根因与发现清单
+
+- 根因位于 SQLx 启动迁移与历史用量维护边界：migration 32 对 `usage_records` 执行全表关联和相关更新，并要求一个启动事务完成；现场数据库约 3.3 GB，`usage_records` / `request_logs` 各约 164 万行，启动日志在 database 阶段等待超过 26 分钟仍未提交。
+- `src-tauri/src/commands/db_repair.rs` 在数据库插件加载前仅为有历史行、已有 `project_path` Schema 且尚未应用 v32 的旧库登记原 v32 description/checksum；空库、缺 Schema 和已应用 v32 均保持标准 SQLx 行为。
+- 同文件新增单飞后台回填：先构造唯一项目路径映射和临时 rowid 队列，再按 2,000 行短事务更新；route 路径按相同 source/session 从最新 session_log 继承。既有非空路径、重名项目和 SSH 项目不会被覆盖或猜测。
+- `src/lib/db.ts` 在 `Database.load` 成功后非阻塞触发真实后台入口；`src-tauri/src/lib.rs` 注册命令。请求日志读取对空路径已有 bounded legacy project-key 兼容，因此回填期间仍可使用。
+- 原 `MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL`、版本 32、视图和 checksum 未修改；统计口径、历史解析、Provider、远程托管与桌宠确认无关。
+- GitNexus 未暴露且本地 `npx` 因缓存权限不可用；按 app-startup/history-stats 契约、`rg`、源码调用链、SQLite 现场数据和 Git diff 降级。变更触达 `getDb` 后全部 SQLite 消费者，风险 HIGH。
+
+### 验证结果
+
+- `cargo test --manifest-path src-tauri/Cargo.toml db_repair --lib`：15 项通过；新增覆盖原 checksum 登记、空库/缺 Schema no-op、唯一/歧义映射、50,005 行跨批次回填、route 继承、已有路径保护及重复运行幂等。
+- `cargo check --manifest-path src-tauri/Cargo.toml`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`node_modules/.bin/tsc --noEmit`、`git diff --check`：通过。
+- `npm run tauri:build:local -- --bundles nsis`：通过，复用 npm/Cargo 缓存，仅生成 `CLI-Manager_1.3.7_x64-setup.exe`；SHA256 `002700BBD64E9579DC8A12DC1FE17011D0099EFBAFA6C2D8FA80584877FE46B8`。
+- GitNexus `detect-changes` 无法执行：当前会话未暴露 MCP，本地无 CLI，`npx --offline` 也没有缓存包；已用契约、源码调用链、聚焦测试和最终 Git diff 完成降级范围复核。
+- 打包前未主动操作仍由已安装 CLI-Manager 使用的 3.3 GB 真实数据库，避免干扰当前会话；现场诊断阶段只执行只读 Schema、迁移状态、行数和日志检查。
+- 用户使用 NSIS 升级包对原 3.3 GB / 164 万行数据库完成真实升级启动冒烟，确认应用不再阻塞于 migration 32，测试通过。

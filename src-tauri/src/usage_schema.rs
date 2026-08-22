@@ -13,6 +13,10 @@ pub(crate) async fn ensure_usage_schema(connection: &mut SqliteConnection) -> Re
             "optimized_unified_usage_records",
             crate::MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_SQL,
         ),
+        (
+            "materialized_request_log_project_path",
+            crate::MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL,
+        ),
     ] {
         for statement in sql
             .split(';')

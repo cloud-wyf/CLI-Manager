@@ -25,7 +25,8 @@ export type SshAuthMode =
 export type SshJumpMode = "none" | "host" | "proxy_jump";
 
 export type SshProxyType = "none" | "http" | "socks5" | "proxy_command";
-export type SshToolSource = "claude" | "codex";
+export type SshToolSource = "claude" | "codex" | "kimi" | "grok";
+export type SshHistorySource = Extract<SshToolSource, "claude" | "codex">;
 export type SshToolIntegrationScopeKind = "hostPrimary" | "projectOverride" | "retainedRoot";
 export type SshToolIntegrationValidationState =
   | "unvalidated"
@@ -135,6 +136,18 @@ export interface SshAgentInstallPreview {
   distributionSource: "bundled" | "remote";
 }
 
+export interface SshAgentAvailableRelease {
+  action: "install" | "upgrade" | "reinstall" | "downgrade";
+  manifestUrl: string;
+  channel: string;
+  version: string;
+  protocolMin: number;
+  protocolMax: number;
+  publishedAt: string;
+  currentVersion: string;
+  distributionSource: "bundled" | "remote";
+}
+
 export interface SshAgentOperationResult {
   action: "installed" | "updated" | "rolledBack" | "uninstalled" | "purged";
   installationId: string;
@@ -200,11 +213,11 @@ export interface SshRemoteHookInstallationRecord {
   managedEntries: number;
   adapterVersion: number;
   installedAt: number;
-  historySourceCandidate: {
-    source: SshToolSource;
+  historySourceCandidate?: {
+    source: SshHistorySource;
     canonicalConfigRoot: string;
     configRootHash: string;
-  };
+  } | null;
 }
 
 export interface SshRemoteHookConfigReport {
@@ -407,6 +420,7 @@ export type RemoteHandoffPhase = "pending" | "active" | "cancelling" | "recovery
 
 export interface RemoteHandoffSessionState {
   phase: RemoteHandoffPhase;
+  agent?: import("./remoteHandoff").RemoteHandoffAgent;
   cliSessionId: string;
   projectName: string;
   workDir: string;
@@ -751,7 +765,7 @@ export interface HistorySearchHit {
 
 export interface SshRemoteHistorySyncResult {
   sourceInstanceId: string;
-  source: SshToolSource;
+  source: SshHistorySource;
   installationId: string;
   remoteMachineId: string;
   sshUser: string;
@@ -773,7 +787,7 @@ export interface SshRemoteHistorySyncResult {
 }
 
 export interface SshRemoteResumePreflight {
-  source: SshToolSource;
+  source: SshHistorySource;
   sourceSessionId: string;
   sourceInstanceId: string;
   installationId: string;
@@ -1059,7 +1073,7 @@ export interface RequestLogItem {
   requested_model?: string | null;
   outbound_model?: string | null;
   response_model?: string | null;
-  usage_status?: "complete" | "partial" | "missing" | "invalid";
+  usage_status?: "complete" | "partial" | "missing" | "invalid" | "not_applicable";
   status_code?: number | null;
   outcome?: string;
   duration_ms?: number;

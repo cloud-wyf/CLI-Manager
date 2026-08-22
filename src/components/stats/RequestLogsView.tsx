@@ -206,15 +206,12 @@ export function RequestLogsView({ onOpenSession, globalFilters }: RequestLogsVie
 
   const query = useQuery({
     queryKey: ["historyRequestLogs", filters, page, refreshNonce],
-    queryFn: async () => {
-      await syncHistoryRequestLogs(false);
-      return invoke<RequestLogPage>("history_list_request_logs", {
+    queryFn: async () => invoke<RequestLogPage>("history_list_request_logs", {
         filters,
         page,
         pageSize: PAGE_SIZE,
         ...(await getHistoryPathArgs()),
-      });
-    },
+      }),
     enabled: !invalidAppliedRange,
   });
 

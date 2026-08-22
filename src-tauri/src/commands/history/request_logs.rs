@@ -6,10 +6,11 @@ use sqlx::Connection;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use tokio::sync::Mutex as AsyncMutex;
 
-const REQUEST_LOG_PARSER_VERSION: i64 = 2;
+const REQUEST_LOG_PARSER_VERSION: i64 = 3;
 const DEFAULT_PAGE_SIZE: u32 = 20;
 const MAX_PAGE_SIZE: u32 = 100;
 const REQUEST_LOG_SOURCES: [&str; 5] = ["claude", "codex", "gemini", "opencode", "grok"];
@@ -95,6 +96,7 @@ pub struct RequestLogPage {
 struct RequestLogDocument {
     source: String,
     project_key: String,
+    project_path: Option<String>,
     session_id: String,
     file_path: String,
     fingerprint: SessionFileFingerprint,
@@ -207,6 +209,19 @@ fn request_log_sync_lock() -> &'static AsyncMutex<()> {
     LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
+fn schedule_legacy_route_attribution_repair() {
+    static REPAIR_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+    if REPAIR_ATTEMPTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = crate::usage::reconcile_route_attribution().await {
+            REPAIR_ATTEMPTED.store(false, Ordering::Release);
+            warn!("request log background route attribution repair failed: {err}");
+        }
+    });
+}
+
 async fn open_cli_manager_db() -> Result<SqliteConnection, String> {
     crate::usage_schema::open_usage_database().await
 }
@@ -278,6 +293,7 @@ fn fallback_event_key(event: &SessionUsageEventScan, index: usize) -> String {
 
 fn document_from_entry(entry: HistoryIndexEntry) -> RequestLogDocument {
     let summary = summary_from_computation(&entry.file_ref, &entry.computed);
+    let project_path = summary.cwd.as_deref().map(normalize_history_path);
     let mut events = stats_usage_events_or_fallback(&summary, &entry.computed.stats);
     for (index, event) in events.iter_mut().enumerate() {
         if event.event_key.trim().is_empty() {
@@ -289,6 +305,7 @@ fn document_from_entry(entry: HistoryIndexEntry) -> RequestLogDocument {
     RequestLogDocument {
         source: entry.file_ref.source,
         project_key: entry.file_ref.project_key,
+        project_path,
         session_id: entry.computed.session_id,
         file_path: path_to_key(&entry.file_ref.path),
         fingerprint: entry.fingerprint,
@@ -298,6 +315,7 @@ fn document_from_entry(entry: HistoryIndexEntry) -> RequestLogDocument {
 
 fn document_from_opencode(parsed: OpenCodeParsedSession) -> RequestLogDocument {
     let summary = opencode_summary_from_parsed(&parsed);
+    let project_path = summary.cwd.as_deref().map(normalize_history_path);
     let mut events = stats_usage_events_or_fallback(&summary, &parsed.computed.stats);
     for (index, event) in events.iter_mut().enumerate() {
         if event.event_key.trim().is_empty() {
@@ -309,6 +327,7 @@ fn document_from_opencode(parsed: OpenCodeParsedSession) -> RequestLogDocument {
     RequestLogDocument {
         source: parsed.file_ref.source,
         project_key: parsed.file_ref.project_key,
+        project_path,
         session_id: parsed.computed.session_id,
         file_path: path_to_key(&parsed.file_ref.path),
         fingerprint: parsed.fingerprint,
@@ -425,14 +444,16 @@ async fn replace_document(
         sqlx::query(
             "INSERT INTO usage_records(
                 record_id, logical_request_id, data_source, source, event_key,
-                file_path, event_index, session_id, project_key, attribution_status,
+                file_path, event_index, session_id, project_key, project_path, attribution_status,
                 response_model, pricing_model, input_tokens, output_tokens,
                 cache_read_tokens, cache_creation_tokens, usage_status, outcome,
                 started_at_ms, completed_at_ms, duration_ms, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, 'session_log', ?3, ?4, ?5, ?6, ?7, ?8, 'resolved',
-                       ?9, ?9, ?10, ?11, ?12, ?13, 'complete', 'success',
-                       ?14, ?14, 0, ?15, ?15)
+             ) VALUES (?1, ?2, 'session_log', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'resolved',
+                       ?10, ?10, ?11, ?12, ?13, ?14, 'complete', 'success',
+                       ?15, ?15, 0, ?16, ?16)
              ON CONFLICT(record_id) DO UPDATE SET
+                project_key = excluded.project_key,
+                project_path = excluded.project_path,
                 response_model = excluded.response_model,
                 pricing_model = excluded.pricing_model,
                 input_tokens = excluded.input_tokens,
@@ -459,6 +480,7 @@ async fn replace_document(
         .bind(event.event_index as i64)
         .bind(&document.session_id)
         .bind(&document.project_key)
+        .bind(&document.project_path)
         .bind(&event.model)
         .bind(event.usage.input_tokens as i64)
         .bind(event.usage.output_tokens as i64)
@@ -599,7 +621,16 @@ async fn sync_request_logs_with_connection(
     let mut failed_files = 0u64;
     for document in &changed_documents {
         match replace_document(conn, document, synced_at_ms).await {
-            Ok(count) => written_rows = written_rows.saturating_add(count),
+            Ok(count) => {
+                written_rows = written_rows.saturating_add(count);
+                crate::usage::reconcile_route_attribution_for_session_with_connection(
+                    conn,
+                    &document.source,
+                    &document.session_id,
+                    synced_at_ms,
+                )
+                .await?;
+            }
             Err(err) => {
                 failed_files = failed_files.saturating_add(1);
                 warn!(
@@ -626,17 +657,19 @@ pub async fn history_sync_request_logs(
     claude_config_dir: Option<String>,
     codex_config_dir: Option<String>,
     grok_session_root: Option<String>,
+    kimi_config_dir: Option<String>,
     force: Option<bool>,
 ) -> Result<RequestLogSyncResult, String> {
     let _guard = request_log_sync_lock().lock().await;
     let mut conn = open_cli_manager_db().await?;
     let result = sync_request_logs_with_connection(
         &mut conn,
-        history_roots(claude_config_dir, codex_config_dir, grok_session_root),
+        history_roots(claude_config_dir, codex_config_dir, grok_session_root)
+            .with_kimi_config_dir(kimi_config_dir),
         force.unwrap_or(false),
     )
     .await?;
-    crate::usage::reconcile_route_attribution().await?;
+    schedule_legacy_route_attribution_repair();
     Ok(result)
 }
 
@@ -654,11 +687,7 @@ fn like_pattern(value: &str) -> String {
     format!("%{escaped}%")
 }
 
-fn push_filters<'a>(
-    builder: &mut QueryBuilder<'a, Sqlite>,
-    filters: &RequestLogFilters,
-    allowed_paths: Option<&'a HashSet<String>>,
-) {
+fn push_filters<'a>(builder: &mut QueryBuilder<'a, Sqlite>, filters: &RequestLogFilters) {
     builder.push(" WHERE 1 = 1");
     if let Some(source) = normalized_filter(filters.source.as_ref()) {
         if request_log_source_allowed(&source) {
@@ -692,22 +721,7 @@ fn push_filters<'a>(
     if let Some(end_at) = filters.end_at {
         builder.push(" AND timestamp_ms <= ").push_bind(end_at);
     }
-    if let Some(allowed_paths) = allowed_paths {
-        if allowed_paths.is_empty() {
-            builder.push(" AND 1 = 0");
-        } else {
-            builder.push(" AND file_path IN (");
-            let mut first = true;
-            for path in allowed_paths {
-                if !first {
-                    builder.push(", ");
-                }
-                first = false;
-                builder.push_bind(path);
-            }
-            builder.push(")");
-        }
-    }
+    push_project_path_filters(builder, filters);
 }
 
 fn normalized_request_log_project_paths(filters: &RequestLogFilters) -> Vec<String> {
@@ -725,72 +739,100 @@ fn normalized_request_log_project_paths(filters: &RequestLogFilters) -> Vec<Stri
     paths
 }
 
-async fn resolve_request_log_project_paths(
-    filters: &RequestLogFilters,
-    roots: &HistoryRoots,
-    force: bool,
-) -> Result<Option<HashSet<String>>, String> {
-    let target_paths = normalized_request_log_project_paths(filters);
-    if target_paths.is_empty() {
-        return Ok(None);
-    }
-    let source_filter = normalized_filter(filters.source.as_ref());
-    if source_filter
-        .as_deref()
-        .is_some_and(|source| !request_log_source_allowed(source))
-    {
-        return Ok(Some(HashSet::new()));
-    }
-
-    let roots_for_scan = roots.clone();
-    let target_paths_for_scan = target_paths.clone();
-    let source_for_scan = source_filter.clone();
-    let mut paths = tokio::task::spawn_blocking(move || {
-        let index = refresh_history_index_snapshot(&roots_for_scan, force);
-        index
-            .entries
-            .into_iter()
-            .filter(|entry| {
-                source_for_scan
-                    .as_deref()
-                    .map(|source| entry.file_ref.source == source)
-                    .unwrap_or(true)
-            })
-            .filter(|entry| {
-                target_paths_for_scan
-                    .iter()
-                    .any(|path| session_matches_project_path(&entry.file_ref, path))
-            })
-            .map(|entry| path_to_key(&entry.file_ref.path))
-            .collect::<HashSet<_>>()
-    })
-    .await
-    .map_err(|err| format!("request_logs_project_scope_failed: {err}"))?;
-
-    if source_filter
-        .as_deref()
-        .map(|source| source == "opencode")
-        .unwrap_or(true)
-    {
-        match opencode_catalog_sessions().await {
-            Ok(Some(sessions)) => {
-                for session in sessions {
-                    if target_paths.iter().any(|path| {
-                        session
-                            .cwd
-                            .as_deref()
-                            .is_some_and(|cwd| opencode_cwd_matches_project_path(cwd, path))
-                    }) {
-                        paths.insert(path_to_key(&session.file_ref.path));
-                    }
-                }
+fn request_log_project_path_candidates(filters: &RequestLogFilters) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for path in normalized_request_log_project_paths(filters) {
+        candidates.push(path.clone());
+        if let Some(wsl_path) = crate::wsl::windows_path_to_wsl(&path) {
+            candidates.push(normalize_history_path(&wsl_path));
+        }
+        if let Some(windows_path) = crate::wsl::wsl_mnt_path_to_windows(&path) {
+            candidates.push(normalize_history_path(&windows_path));
+        }
+        if let Some((_, linux_path)) = crate::wsl::parse_wsl_unc_path(&path) {
+            let linux_path = normalize_history_path(&linux_path);
+            if let Some(windows_path) = crate::wsl::wsl_mnt_path_to_windows(&linux_path) {
+                candidates.push(normalize_history_path(&windows_path));
             }
-            Ok(None) => {}
-            Err(err) => warn!("request log project scope skipped OpenCode database: {err}"),
+            candidates.push(linux_path);
         }
     }
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
 
-    Ok(Some(paths))
+fn prefix_like_pattern(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("{escaped}/%")
+}
+
+fn push_project_path_filters<'a>(
+    builder: &mut QueryBuilder<'a, Sqlite>,
+    filters: &RequestLogFilters,
+) {
+    let candidates = request_log_project_path_candidates(filters);
+    if candidates.is_empty() {
+        return;
+    }
+    let mut claude_keys = candidates
+        .iter()
+        .map(|path| claude_project_key_from_path(path))
+        .collect::<Vec<_>>();
+    claude_keys.sort_unstable();
+    claude_keys.dedup();
+    let mut legacy_project_keys = candidates
+        .iter()
+        .flat_map(|path| {
+            [
+                Some(path.to_lowercase()),
+                project_key_from_cwd(path).map(|key| key.to_lowercase()),
+            ]
+        })
+        .flatten()
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    legacy_project_keys.sort_unstable();
+    legacy_project_keys.dedup();
+
+    builder.push(" AND (");
+    let mut needs_or = false;
+    for candidate in candidates {
+        if needs_or {
+            builder.push(" OR ");
+        }
+        builder
+            .push("(project_path = ")
+            .push_bind(candidate.clone())
+            .push(" OR project_path LIKE ")
+            .push_bind(prefix_like_pattern(&candidate))
+            .push(" ESCAPE '\\')");
+        needs_or = true;
+    }
+    for project_key in claude_keys {
+        if needs_or {
+            builder.push(" OR ");
+        }
+        builder
+            .push("(source = 'claude' AND LOWER(project_key) = ")
+            .push_bind(project_key)
+            .push(")");
+        needs_or = true;
+    }
+    for project_key in legacy_project_keys {
+        if needs_or {
+            builder.push(" OR ");
+        }
+        builder
+            .push("(source <> 'claude' AND NULLIF(TRIM(project_path), '') IS NULL AND LOWER(project_key) = ")
+            .push_bind(project_key)
+            .push(")");
+        needs_or = true;
+    }
+    builder.push(")");
 }
 
 async fn list_request_logs_with_connection(
@@ -798,7 +840,6 @@ async fn list_request_logs_with_connection(
     filters: RequestLogFilters,
     page: u32,
     page_size: u32,
-    allowed_paths: Option<&HashSet<String>>,
 ) -> Result<RequestLogPage, String> {
     if normalized_filter(filters.source.as_ref())
         .is_some_and(|source| !request_log_source_allowed(&source))
@@ -823,7 +864,7 @@ async fn list_request_logs_with_connection(
             SUM(cache_creation_tokens) AS cache_creation_tokens
          FROM unified_usage_records",
     );
-    push_filters(&mut summary_builder, &filters, allowed_paths);
+    push_filters(&mut summary_builder, &filters);
     summary_builder.push(" GROUP BY model");
     let summary_rows = summary_builder
         .build()
@@ -897,7 +938,7 @@ async fn list_request_logs_with_connection(
             status_code, outcome, duration_ms, attempt_count, degraded
          FROM unified_usage_records",
     );
-    push_filters(&mut page_builder, &filters, allowed_paths);
+    push_filters(&mut page_builder, &filters);
     page_builder
         .push(" ORDER BY timestamp_ms DESC, request_id DESC LIMIT ")
         .push_bind(page_size as i64)
@@ -995,17 +1036,21 @@ pub async fn history_list_request_logs(
     claude_config_dir: Option<String>,
     codex_config_dir: Option<String>,
     grok_session_root: Option<String>,
+    kimi_config_dir: Option<String>,
 ) -> Result<RequestLogPage, String> {
     let filters = filters.unwrap_or_default();
-    let roots = history_roots(claude_config_dir, codex_config_dir, grok_session_root);
-    let allowed_paths = resolve_request_log_project_paths(&filters, &roots, false).await?;
+    let _ = (
+        claude_config_dir,
+        codex_config_dir,
+        grok_session_root,
+        kimi_config_dir,
+    );
     let mut conn = open_cli_manager_db().await?;
     list_request_logs_with_connection(
         &mut conn,
         filters,
         page.unwrap_or(0),
         page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-        allowed_paths.as_ref(),
     )
     .await
 }
@@ -1086,6 +1131,7 @@ pub async fn history_get_request_log_stats(
     claude_config_dir: Option<String>,
     codex_config_dir: Option<String>,
     grok_session_root: Option<String>,
+    kimi_config_dir: Option<String>,
 ) -> Result<RequestLogStatsResponse, String> {
     let mut filters = filters.unwrap_or_default();
     if normalized_filter(filters.source.as_ref())
@@ -1108,15 +1154,19 @@ pub async fn history_get_request_log_stats(
     } else {
         "day"
     };
-    let roots = history_roots(claude_config_dir, codex_config_dir, grok_session_root);
-    let allowed_paths = resolve_request_log_project_paths(&filters, &roots, false).await?;
+    let _ = (
+        claude_config_dir,
+        codex_config_dir,
+        grok_session_root,
+        kimi_config_dir,
+    );
     let mut conn = open_cli_manager_db().await?;
     let mut builder = QueryBuilder::<Sqlite>::new(
         "SELECT source, model, timestamp_ms, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens
          FROM unified_usage_records",
     );
-    push_filters(&mut builder, &filters, allowed_paths.as_ref());
+    push_filters(&mut builder, &filters);
     builder.push(" ORDER BY timestamp_ms ASC, request_id ASC");
     let rows = builder
         .build()
@@ -1256,6 +1306,12 @@ mod tests {
                 sqlx::query(statement).execute(&mut conn).await.unwrap();
             }
         }
+        for statement in crate::MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&mut conn).await.unwrap();
+            }
+        }
         conn
     }
 
@@ -1370,7 +1426,6 @@ mod tests {
             },
             0,
             500,
-            None,
         )
         .await
         .unwrap();
@@ -1422,7 +1477,7 @@ mod tests {
         .unwrap();
 
         let page =
-            list_request_logs_with_connection(&mut conn, RequestLogFilters::default(), 0, 20, None)
+            list_request_logs_with_connection(&mut conn, RequestLogFilters::default(), 0, 20)
                 .await
                 .unwrap();
 
@@ -1431,6 +1486,80 @@ mod tests {
         assert_eq!(page.data[0].data_source, "route");
         assert_eq!(page.summary.total_input_tokens, 1000);
         assert_eq!(page.summary.total_output_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn project_path_filter_uses_materialized_windows_wsl_and_claude_keys() {
+        let mut conn = test_connection().await;
+        sqlx::query(
+            "INSERT INTO usage_records(
+                record_id, logical_request_id, data_source, source, event_key, file_path,
+                event_index, session_id, project_key, project_path, attribution_status,
+                response_model, pricing_model, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, usage_status, outcome,
+                started_at_ms, completed_at_ms, duration_ms, created_at_ms, updated_at_ms
+             ) VALUES
+                ('windows-row', 'windows-row', 'session_log', 'codex', 'e1', 'windows.jsonl',
+                 0, 'session-windows', 'project-windows', 'd:/work/project/subdir', 'resolved',
+                 'gpt-test', 'gpt-test', 10, 1, 0, 0, 'complete', 'success', 1000, 1000, 0, 1000, 1000),
+                ('wsl-row', 'wsl-row', 'session_log', 'codex', 'e2', 'wsl.jsonl',
+                 0, 'session-wsl', 'project-wsl', '/mnt/d/work/project/worktree', 'resolved',
+                 'gpt-test', 'gpt-test', 20, 2, 0, 0, 'complete', 'success', 2000, 2000, 0, 2000, 2000),
+                ('claude-row', 'claude-row', 'session_log', 'claude', 'e3', 'claude.jsonl',
+                 0, 'session-claude', 'd--work-project', NULL, 'resolved',
+                 'claude-test', 'claude-test', 30, 3, 0, 0, 'complete', 'success', 3000, 3000, 0, 3000, 3000),
+                ('legacy-codex-row', 'legacy-codex-row', 'session_log', 'codex', 'e4', 'legacy-codex.jsonl',
+                 0, 'session-legacy-codex', 'project', NULL, 'resolved',
+                 'gpt-test', 'gpt-test', 35, 3, 0, 0, 'complete', 'success', 3500, 3500, 0, 3500, 3500),
+                ('other-row', 'other-row', 'session_log', 'codex', 'e4', 'other.jsonl',
+                 0, 'session-other', 'project-other', 'd:/work/other', 'resolved',
+                 'gpt-test', 'gpt-test', 40, 4, 0, 0, 'complete', 'success', 4000, 4000, 0, 4000, 4000)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        let page = list_request_logs_with_connection(
+            &mut conn,
+            RequestLogFilters {
+                project_path: Some(r"D:\work\project".to_string()),
+                ..RequestLogFilters::default()
+            },
+            0,
+            20,
+        )
+        .await
+        .unwrap();
+
+        let ids = page
+            .data
+            .iter()
+            .map(|item| item.request_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(page.total, 4);
+        assert!(ids.contains("windows-row"));
+        assert!(ids.contains("wsl-row"));
+        assert!(ids.contains("claude-row"));
+        assert!(ids.contains("legacy-codex-row"));
+        assert!(!ids.contains("other-row"));
+
+        for project_path in [
+            "/mnt/d/work/project",
+            r"\\wsl.localhost\Ubuntu\mnt\d\work\project",
+        ] {
+            let equivalent_page = list_request_logs_with_connection(
+                &mut conn,
+                RequestLogFilters {
+                    project_path: Some(project_path.to_string()),
+                    ..RequestLogFilters::default()
+                },
+                0,
+                20,
+            )
+            .await
+            .unwrap();
+            assert_eq!(equivalent_page.total, 4, "project path: {project_path}");
+        }
     }
 
     #[test]

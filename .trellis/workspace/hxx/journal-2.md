@@ -962,3 +962,199 @@ OpenCode/Pi/Amp/Aider/Crush/Cline/Goose 等无厂商归属的 CLI 工具在 Tab 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 88: 修复供应商作用域与 Pi 终端诊断
+
+**Date**: 2026-08-17
+**Task**: 修复供应商作用域与 Pi 终端诊断
+**Branch**: `master`
+
+### Summary
+
+修复供应商生命周期引用扫描、项目作用域切换、Grok 项目级提示、Tab 中键关闭、Pi 预览、Pi Hook 非阻塞上报与 MCP Adapter 能力发现。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3207bc68` | (see git log) |
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 89: 修复 SSH Grok 会话历史打开提示
+
+**Date**: 2026-08-18
+**Task**: 修复 SSH Grok 会话历史打开提示
+**Branch**: `master`
+
+### Summary
+
+SSH Grok 在历史入口改为显示明确的暂不支持提示，避免暴露底层 history_remote_source_required 错误。
+
+### Main Changes
+
+- 将 SSH 会话历史能力限制为远程桥接已支持的 Claude Code 与 Codex CLI。
+- 在侧边栏和终端工具栏统一显示 Grok 暂不支持查看会话历史的中英文提示。
+- 补充能力矩阵测试、V1.3.7 交付记录和历史契约。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `60372d68` | (see git log) |
+
+### Testing
+
+- [OK] node --test scripts/projectCapabilities.test.mjs scripts/sshRemoteFileContext.test.mjs（5/5 通过）
+- [OK] npx tsc --noEmit（通过）
+- [OK] npm run build（通过）
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 90: 历史会话对话消息操作栏
+
+**Date**: 2026-08-18
+**Task**: 历史会话对话消息操作栏
+**Branch**: `master`
+
+### Summary
+
+对话页复用原文消息操作栏；编辑和插入通过既有闸门后切换原文表单，SSH/快照保持只读，并补齐 V1.3.7 记录与历史会话契约。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f8602bb` | (see git log) |
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 91: Fix PR #219 Kimi cross-platform tests
+
+**Date**: 2026-08-19
+**Task**: Fix PR #219 Kimi cross-platform tests
+**Branch**: `agent/kimi-code-cli-hooks`
+
+### Summary
+
+Fixed CRLF-safe Kimi frontend test extraction and Unix-only SSH Agent planner coverage; validated and pushed the PR branch for review.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a9781941` | (see git log) |
+| `2152a22d` | (see git log) |
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 92: 修复 Kimi Hook 本地检测延迟
+
+**Date**: 2026-08-19
+**Task**: 修复 Kimi Hook 本地检测延迟
+**Branch**: `master`
+
+### Summary
+
+移除本地 Kimi Hook 状态与安装中的 CLI/doctor 子进程检测，修正空配置状态，保留 TOML 原子写入保护，并将 TEMP 发布记录整理到 V1.3.7。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `890f59d4` | (see git log) |
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 93: Review and harden PR 220 Kimi history
+
+**Date**: 2026-08-20
+**Task**: Review and harden PR 220 Kimi history
+**Branch**: `pr220`
+
+### Summary
+
+Reviewed PR #220 against current Kimi Code, fixed wire usage parsing, append-only index and tombstone behavior, session-id command validation, added regression coverage, ran full checks, and updated V1.3.7 documentation.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c52a9b7f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 94: Fix provider dialog layering and terminal file navigation
+
+**Date**: 2026-08-21
+**Task**: Fix provider dialog layering and terminal file navigation
+**Branch**: `master`
+
+### Summary
+
+Raised the provider delete confirmation above its parent modal and normalized slash-form Windows file paths at the Explorer boundary, with regression coverage and V1.3.8 release records.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `575f903e` | (see git log) |
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 95: 修复 PR #224 Grok Hook 配置恢复
+
+**Date**: 2026-08-21
+**Task**: 修复 PR #224 Grok Hook 配置恢复
+**Branch**: `agent/grok-ssh-hooks-history`
+
+### Summary
+
+修复 Grok 兼容 Hook 卸载覆盖用户配置的问题，补齐 Linux 测试编译与 Windows 测试告警清理，并已推送至 PR #224。
+
+### Main Changes
+
+- Grok compat 配置以 installation id marker 记录原始状态，只恢复本实例持有的 true/缺失值。
+- 补充注释、既有 false、外部实例、用户改写、缺失表和 dotted TOML 的回归测试。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dde0f550` | (see git log) |
+| `84326c38` | (see git log) |
+| `e4c62bc2` | (see git log) |
+
+### Testing
+
+- [OK] npx tsc --noEmit；cargo check/test；SSH Agent 90 项主机测试；Linux x86_64/aarch64 测试编译；34 项前端脚本测试通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- PR #224 仍与 master 冲突；解决冲突并合并后，从上游 master 创建 ssh-agent-v0.1.10 标签。

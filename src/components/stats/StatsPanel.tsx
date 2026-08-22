@@ -37,7 +37,7 @@ import type {
   RequestLogSource,
   RequestLogStatsPayload,
 } from "../../lib/types";
-import { fetchHistoryRequestLogStats, fetchHistoryStatsPayload, fetchRemoteHistoryStatsPayload } from "../../stores/historyStore";
+import { fetchHistoryRequestLogStats, fetchHistoryStatsPayload, fetchRemoteHistoryStatsPayload, syncHistoryRequestLogs } from "../../stores/historyStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { HISTORY_SOURCE_DESCRIPTORS, HISTORY_SOURCE_DESCRIPTOR_BY_ID } from "../../lib/historySources";
 import { TimelineHeatmap } from "./TimelineHeatmap";
@@ -64,6 +64,7 @@ import { resolveHistorySourceIconKey } from "../../lib/cliTools";
 import { RequestLogsView } from "./RequestLogsView";
 import { projectSupportsCapability } from "../../lib/projectCapabilities";
 import { resolveHistoryProjectPath } from "../../lib/historyProjectPaths";
+import { logWarn } from "../../lib/logger";
 
 interface StatsPanelProps {
   open: boolean;
@@ -1418,6 +1419,8 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
   const [activeTab, setActiveTab] = useState<StatsPanelTab>("overview");
   const [timeWindow, setTimeWindow] = useState<StatsTimeWindowState>(() => getDefaultStatsTimeWindow());
   const [manualRefresh, setManualRefresh] = useState<{ key: string; nonce: number } | null>(null);
+  const [syncingLocalStats, setSyncingLocalStats] = useState(false);
+  const [localStatsSyncError, setLocalStatsSyncError] = useState<string | null>(null);
   const [selectedDayStart, setSelectedDayStart] = useState<number | null>(null);
   const [dayVisibleCount, setDayVisibleCount] = useState(DAY_SESSION_PAGE_SIZE);
   const resolvedTimeWindow = useMemo(() => resolveStatsTimeWindow(timeWindow), [timeWindow]);
@@ -1456,7 +1459,7 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
         rangeDays: null,
         startAt: dateBounds.startAt,
         endAt: dateBounds.endAt,
-        force: effectiveRefreshNonce > 0,
+        force: selectedProject?.environment_type === "ssh" && effectiveRefreshNonce > 0,
       };
       return selectedProject?.environment_type === "ssh"
         ? fetchRemoteHistoryStatsPayload(selectedProject, options)
@@ -1465,7 +1468,7 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
     enabled: open && activeTab === "overview" && dateBounds.error === null && dateBounds.startAt !== null && dateBounds.endAt !== null,
   });
   const stats = statsQuery.data ?? null;
-  const loadingStats = statsQuery.isFetching;
+  const loadingStats = statsQuery.isFetching || syncingLocalStats;
   const statsError = statsQuery.error ? String(statsQuery.error) : null;
   const statsUpdatedAt = statsQuery.dataUpdatedAt || null;
   const requestStatsSupported = sourceFilter === "all" || REQUEST_LOG_SOURCE_IDS.has(sourceFilter);
@@ -1485,7 +1488,7 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
         model: modelFilter || null,
         startAt: dateBounds.startAt,
         endAt: dateBounds.endAt,
-        force: effectiveRefreshNonce > 0,
+        force: false,
       });
     },
     enabled: open
@@ -1587,7 +1590,27 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
 
   const refreshStats = () => {
     if (dateBounds.error || dateBounds.startAt === null || dateBounds.endAt === null) return;
-    setManualRefresh({ key: statsBaseQueryKey, nonce: Date.now() });
+    setLocalStatsSyncError(null);
+    if (selectedProject?.environment_type === "ssh") {
+      setManualRefresh({ key: statsBaseQueryKey, nonce: Date.now() });
+      return;
+    }
+    if (syncingLocalStats) return;
+    setSyncingLocalStats(true);
+    void (async () => {
+      try {
+        await syncHistoryRequestLogs(true);
+        await Promise.allSettled([
+          statsQuery.refetch(),
+          requestStatsSupported ? requestStatsQuery.refetch() : Promise.resolve(),
+        ]);
+      } catch (error) {
+        logWarn("history.stats.manualSyncFailed", { error: String(error) });
+        setLocalStatsSyncError(String(error));
+      } finally {
+        setSyncingLocalStats(false);
+      }
+    })();
   };
   const controlClass = "h-8 rounded-md border border-border bg-bg-secondary px-2 text-xs text-text-primary";
   const timeInputClass = `${controlClass} min-w-[132px]`;
@@ -1674,12 +1697,17 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
                 <StatsDatePicker mode="date" value={resolvedTimeWindow.customEnd} onChange={(value) => setTimeWindow((prev) => ({ ...prev, customEnd: value }))} className={timeInputClass} ariaLabel={t("stats.customEnd")} />
               </>
             )}
-            <Button onClick={refreshStats} disabled={dateBounds.error !== null || waitingForStatsQuery} aria-label={t("common.refresh")} size="sm">
+            <Button onClick={refreshStats} disabled={dateBounds.error !== null || waitingForStatsQuery || syncingLocalStats} aria-label={t("common.refresh")} size="sm">
               <RefreshCw size={12} className={loadingStats ? "animate-spin" : ""} />{t("common.refresh")}
             </Button>
             <div className="ml-auto text-[12px] font-medium text-text-secondary">{t("stats.lastRefresh", { value: waitingForStatsQuery ? "-" : formatDateTime(statsUpdatedAt, language) })}</div>
             <div className="w-full text-[12px] font-medium text-text-secondary">{t("stats.currentRange", { value: dateRangeLabel })}</div>
             {dateBounds.error && <div className="w-full text-[12px] font-medium text-danger">{dateBounds.error}</div>}
+            {localStatsSyncError && (
+              <div className="w-full text-[12px] font-medium text-danger">
+                {t("stats.refreshSyncFailed", { error: localStatsSyncError })}
+              </div>
+            )}
           </div>
         )}
 
