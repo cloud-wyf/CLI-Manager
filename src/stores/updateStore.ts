@@ -3,7 +3,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { create } from "zustand";
 
-const RELEASES_URL = "https://github.com/dark-hxx/CLI-Manager/releases";
+const RELEASES_URL = "https://github.com/cloud-wyf/CLI-Manager/releases";
 const AUR_PACKAGE_URL = "https://aur.archlinux.org/packages/cli-manager-bin";
 const MAX_RELEASE_NOTES_LENGTH = 1200;
 export type AppDistribution = "standalone" | "portable" | "aur";
@@ -44,7 +44,7 @@ function normalizeVersion(version: string | null | undefined): string {
 
 function buildReleaseUrl(version: string | null | undefined): string {
   const normalized = normalizeVersion(version);
-  return normalized ? `${RELEASES_URL}/tag/V${normalized}` : `${RELEASES_URL}/latest`;
+  return normalized ? `${RELEASES_URL}/tag/fork-v${normalized}` : `${RELEASES_URL}/latest`;
 }
 
 function trimReleaseNotes(notes: string | undefined): string {

@@ -18,7 +18,8 @@ import { useUpdateStore } from "../../stores/updateStore";
 import { MarkdownContent } from "../ui/MarkdownContent";
 import { pickByLanguage, useI18n } from "../../lib/i18n";
 
-const REPOSITORY_URL = "https://github.com/dark-hxx/CLI-Manager";
+const REPOSITORY_URL = "https://github.com/cloud-wyf/CLI-Manager";
+const UPSTREAM_URL = "https://github.com/dark-hxx/CLI-Manager";
 const MANUAL_URL = `${REPOSITORY_URL}/blob/master/docs/%E5%8A%9F%E8%83%BD%E6%B8%85%E5%8D%95.md`;
 const AUTHOR_URL = "https://github.com/dark-hxx";
 const AUR_PACKAGE_URL = "https://aur.archlinux.org/packages/cli-manager-bin";
@@ -408,6 +409,12 @@ export function AboutSection() {
             url={REPOSITORY_URL}
           />
           <ExternalLinkItem
+            icon={Github}
+            title={text("上游原项目", "Upstream Project")}
+            description={text("本项目基于该项目修改，同样以 AGPL-3.0-or-later 分发。", "This project is a modified version of it, distributed under AGPL-3.0-or-later.")}
+            url={UPSTREAM_URL}
+          />
+          <ExternalLinkItem
             icon={BookOpen}
             title={text("操作手册", "User Manual")}
             description={text("查看功能清单、使用说明和能力边界。", "View feature list, usage notes, and capability boundaries.")}
@@ -423,7 +430,8 @@ export function AboutSection() {
           </span>
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold text-on-surface">{text("作者信息", "Author")}</div>
-            <div className="mt-2 text-sm text-on-surface-variant">{text("作者：", "Author: ")}hxx / dark-hxx</div>
+            <div className="mt-2 text-sm text-on-surface-variant">{text("原作者：", "Original author: ")}hxx / dark-hxx</div>
+            <div className="mt-1 text-sm text-on-surface-variant">{text("本修改版维护：", "Fork maintained by: ")}cloud-wyf</div>
             <div className="mt-1 text-xs leading-5 text-on-surface-variant">
               {text("项目长期围绕 AI CLI 工作流、终端体验、历史会话分析和多项目管理持续演进。", "The project continues to evolve around AI CLI workflows, terminal experience, history analytics, and multi-project management.")}
             </div>

@@ -1,5 +1,12 @@
 # CLI-Manager
 
+> **This is a modified version of [dark-hxx/CLI-Manager](https://github.com/dark-hxx/CLI-Manager)**,
+> maintained by [cloud-wyf](https://github.com/cloud-wyf), last modified 2026-08-23.
+> Both the original project and this modified version are licensed under AGPL-3.0-or-later.
+>
+> Changes from upstream: Claude Light theme, inline history expansion on sidebar project rows,
+> transparent title bar with equal-height card layout, and a fork-specific build pipeline.
+
 > **Language**: English | [简体中文](README.zh-CN.md)
 
 <div align="center">
