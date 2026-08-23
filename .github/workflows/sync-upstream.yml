@@ -1,0 +1,94 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 北京时间 04:37，避开整点高峰
+    - cron: "37 20 * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 只试算合并，不落盘、不推送：本 fork 的界面改动与上游触碰同一批文件，
+      # 冲突判定需要跨文件的语义知识（例如某个 i18n key 是否已被本地删除），
+      # 自动解会静默丢功能。
+      - name: Check upstream
+        id: check
+        run: |
+          git remote add upstream https://github.com/dark-hxx/CLI-Manager.git
+          git fetch --quiet upstream master
+
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "已是最新"
+            exit 0
+          fi
+
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          if git merge --no-commit --no-ff upstream/master >/dev/null 2>&1; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+          fi
+          git merge --abort 2>/dev/null || true
+
+          git show upstream/master:package.json > /tmp/upstream-package.json
+          echo "upstream_version=$(node -p "require('/tmp/upstream-package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "local_version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          git log --oneline --no-merges HEAD..upstream/master | head -30 > /tmp/commits.txt
+
+      - name: Report
+        if: steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "已有未关闭的同步提醒 #$EXISTING，跳过"
+            exit 0
+          fi
+
+          {
+            echo "本地 \`${{ steps.check.outputs.local_version }}\` → 上游 \`${{ steps.check.outputs.upstream_version }}\`，落后 ${{ steps.check.outputs.behind }} 个提交。"
+            echo
+            if [ "${{ steps.check.outputs.clean }}" = "true" ]; then
+              echo "✅ 可干净合并。"
+            else
+              echo "⚠️ 存在冲突，需人工处理："
+              echo
+              echo '```'
+              cat /tmp/conflicts.txt
+              echo '```'
+            fi
+            echo
+            echo "## 上游新提交"
+            echo
+            echo '```'
+            cat /tmp/commits.txt
+            echo '```'
+            echo
+            echo "## 同步步骤"
+            echo
+            echo '```bash'
+            echo 'git fetch upstream && git merge upstream/master'
+            echo 'npx tsc --noEmit && (cd src-tauri && cargo check)'
+            echo 'git push origin master'
+            echo 'gh workflow run fork-release.yml'
+            echo '```'
+          } > /tmp/issue-body.md
+
+          gh issue create \
+            --title "上游有 ${{ steps.check.outputs.behind }} 个新提交待同步（v${{ steps.check.outputs.upstream_version }}）" \
+            --label upstream-sync \
+            --body-file /tmp/issue-body.md

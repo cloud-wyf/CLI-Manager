@@ -1,0 +1,141 @@
+name: Fork Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "fork-v*"
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust-target: ""
+          # 需要 macOS / Linux 时取消注释
+          # - platform: macos-14
+          #   args: "--target aarch64-apple-darwin"
+          #   rust-target: aarch64-apple-darwin
+          # - platform: ubuntu-22.04
+          #   args: ""
+          #   rust-target: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Agent 二进制与 manifest 由上游私钥签名，验签公钥是编译期嵌入的
+      # src-tauri/ssh-agent-public-key.txt（上游公钥），因此整套直接取用即可。
+      - name: Fetch SSH Agent bundle from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/ssh-agent
+          gh release download \
+            --repo dark-hxx/CLI-Manager \
+            --pattern 'cli-manager-ssh-agent-linux-x86_64' \
+            --pattern 'cli-manager-ssh-agent-linux-aarch64' \
+            --pattern 'ssh-agent-release-manifest.json' \
+            --pattern 'ssh-agent-release-manifest.json.sig' \
+            --dir src-tauri/resources/ssh-agent \
+            --clobber
+
+      # bundled_release_presence() 要求四件套全有或全无，缺一个直接报
+      # ssh_agent_bundled_resources_incomplete。
+      - name: Verify SSH Agent bundle
+        shell: bash
+        run: |
+          for required in \
+            cli-manager-ssh-agent-linux-x86_64 \
+            cli-manager-ssh-agent-linux-aarch64 \
+            ssh-agent-release-manifest.json \
+            ssh-agent-release-manifest.json.sig
+          do
+            test -f "src-tauri/resources/ssh-agent/$required" || {
+              echo "Missing bundled SSH Agent file: $required" >&2
+              exit 1
+            }
+          done
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract upstream changelog
+        id: changelog
+        shell: bash
+        run: |
+          CHANGELOG=$(node .github/scripts/extract-changelog.js "${{ steps.version.outputs.version }}" || echo "")
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="详见 CHANGELOG.md"
+          fi
+          {
+            echo "content<<CHANGELOG_EOF"
+            echo "$CHANGELOG"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        with:
+          tagName: "fork-v${{ steps.version.outputs.version }}"
+          releaseName: "CLI-Manager Fork v${{ steps.version.outputs.version }}"
+          releaseBody: |
+            基于上游 v${{ steps.version.outputs.version }} 的个人构建，含本 fork 的界面改动。
+
+            > Windows 首次安装可能触发 SmartScreen 提示，点击"仍要运行"继续。
+            > 便携版：下载 `-Windows-x64-portable.zip`，解压直接运行 `cli-manager.exe`。
+
+            ## 上游变更
+
+            ${{ steps.changelog.outputs.content }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: --config src-tauri/tauri.fork.conf.json ${{ matrix.args }}
+
+      - name: Package Windows portable ZIP
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: .\scripts\package-portable.ps1 -Version "${{ steps.version.outputs.version }}" -OutputDir "dist/portable"
+
+      - name: Upload Windows portable ZIP
+        if: matrix.platform == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "fork-v${{ steps.version.outputs.version }}"
+          files: dist/portable/*.zip
