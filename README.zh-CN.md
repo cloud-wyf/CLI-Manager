@@ -1,11 +1,13 @@
 # CLI-Manager
 
-> **本项目是 [dark-hxx/CLI-Manager](https://github.com/dark-hxx/CLI-Manager) 的修改版**，
+> **本项目是 [dark-hxx/CLI-Manager](https://github.com/dark-hxx/CLI-Manager) 的个人修改版，仅供自用。**
+>
+> **需要使用请前往原仓库：[dark-hxx/CLI-Manager](https://github.com/dark-hxx/CLI-Manager)** —— 那里有完整文档、官方发布包和支持渠道。本仓库不接受 Issue 与 Pull Request，不保证稳定可用，可能随个人需要随时变更。
+>
 > 由 [cloud-wyf](https://github.com/cloud-wyf) 维护，最近修改于 2026-08-23。
 > 原项目与本修改版均采用 AGPL-3.0-or-later 授权。
 >
-> 相对上游的改动：Claude Light 浅色主题、侧栏项目行内联展开历史会话、
-> 标题栏透明化与等高卡片布局、fork 专属构建流水线。
+> 相对上游的改动：Claude Light 浅色主题、侧栏项目行内联展开历史会话、标题栏透明化与等高卡片布局、fork 专属构建流水线。
 
 > **语言**：简体中文 | [English](README.md)
 
