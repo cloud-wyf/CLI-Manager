@@ -13,10 +13,20 @@ const historyResume = read("../src/components/history/useHistoryResume.tsx");
 test("raw backend rows go through normalizeSummary, never a bare cast", () => {
   // 后端按 camelCase 序列化（sessionId/projectKey）。把原始行直接断言成 snake_case 的
   // HistorySessionSummary 会让 session_id 变 undefined，resume 时 .trim() 抛异常。
-  assert.match(historySessions, /import \{ normalizeSummary \} from "\.\.\/\.\.\/stores\/historyStore";/);
+  assert.match(historySessions, /import \{[^}]*\bnormalizeSummary\b[^}]*\} from "\.\.\/\.\.\/stores\/historyStore";/);
   assert.match(historySessions, /invoke<unknown\[\]>\("history_list_sessions"/);
   assert.match(historySessions, /\.map\(\(row\) => normalizeSummary\(row\)\)/);
   assert.doesNotMatch(historySessions, /invoke<HistorySessionSummary\[\]>/);
+});
+
+test("sidebar history rows show the resolved display title", () => {
+  // 智能标题在 generatedTitleMap、用户别名在 metaMap，两者都不在原始 summary 上。
+  // 侧栏若直接渲染 summary.title，历史面板能看到的标题在侧栏永远不显示。
+  assert.match(historySessions, /decorateHistorySummaries\(/);
+  assert.match(treeNodeItem, /const title = session\.displayTitle;/);
+  assert.doesNotMatch(treeNodeItem, /session\.title\.trim\(\)/);
+  // 列表与 resume 必须显示同一个标题。
+  assert.doesNotMatch(sidebar, /session\.title\.trim\(\) \|\| session\.session_id/);
 });
 
 test("resume rejections surface instead of being swallowed by void", () => {
@@ -74,7 +84,7 @@ test("sidebar resumes through the shared history resume flow", () => {
   // 传项目 id 作为 hint，让 selectLocalHistoryResumeProject 直接命中该项目。
   assert.match(
     sidebar,
-    /requestResume\(session, session\.title\.trim\(\) \|\| session\.session_id, project\.id\)/
+    /requestResume\(session, session\.displayTitle, project\.id\)/
   );
   // 候选歧义时要有对话框可弹。
   assert.match(sidebar, /\{resumeDialog\}/);
@@ -125,6 +135,28 @@ test("collapsing a project drops its cached sessions and cancels in-flight reque
 
 test("history pagination fetches one extra row to detect the next page", () => {
   assert.match(historySessions, /const PAGE_SIZE = 20;/);
-  assert.match(historySessions, /limit: PAGE_SIZE \+ 1,/);
-  assert.match(historySessions, /hasMore: rows\.length > PAGE_SIZE,/);
+  assert.match(historySessions, /limit: limit \+ 1,/);
+  assert.match(historySessions, /hasMore: rows\.length > limit,/);
+});
+
+test("generated titles refresh the expanded sidebar list", () => {
+  // 展开列表是 React 局部状态，store 够不到它的 reload，只能靠版本号通知。
+  // 侧栏不订阅的话，新标题和新会话都要等用户手动折叠再展开才看得到。
+  const store = read("../src/stores/historyStore.ts");
+  assert.match(store, /historyListRevision: state\.historyListRevision \+ 1,/);
+  assert.match(historySessions, /useHistoryStore\(\(s\) => s\.historyListRevision\)/);
+  assert.match(historySessions, /if \(project\) runLoad\(project, "refresh"\);/);
+  // 首帧不能触发重拉，否则展开时会连拉两次。
+  assert.match(historySessions, /if \(handledRevisionRef\.current === historyListRevision\) return;/);
+});
+
+test("a background refresh keeps what the user is already looking at", () => {
+  // 刷新由别处触发，用户没发起过这次请求：不能闪一下“加载中”，不能把已经
+  // 翻到的条数打回第一页，也不能因为一次后台失败就把列表换成错误页。
+  assert.match(historySessions, /if \(mode === "refresh" && current\) return prev;/);
+  assert.match(historySessions, /const limit = mode === "refresh" \? Math\.max\(PAGE_SIZE, loaded\) : PAGE_SIZE;/);
+  assert.match(historySessions, /if \(mode === "replace"\) loadedCountRef\.current\.set\(projectId, 0\);/);
+  // 只有 replace 清空列表，refresh 必须复用上一份内容。
+  const clearing = historySessions.match(/status: "loading", sessions: \[\]/g) ?? [];
+  assert.equal(clearing.length, 1, "only the replace path may clear the list");
 });

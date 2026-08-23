@@ -1,7 +1,7 @@
 import { DndContext, DragOverlay, PointerSensor, closestCenter, useSensor, useSensors, type CollisionDetection, type DragStartEvent } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import type { HistorySessionSummary, Project, TerminalScope, TreeNode as TNode } from "../../lib/types";
+import type { HistorySessionView, Project, TerminalScope, TreeNode as TNode } from "../../lib/types";
 import { SidebarSkeleton } from "../ui/Skeleton";
 import { EmptyState } from "../ui/EmptyState";
 import { Popover, PopoverAnchor, PopoverContent } from "../ui/popover";
@@ -53,7 +53,7 @@ interface VisibleTreeNode {
   groupName?: string;
   projectId?: string;
   worktreeId?: string;
-  historySession?: HistorySessionSummary;
+  historySession?: HistorySessionView;
   isOpen?: boolean;
   hasChildren?: boolean;
   firstChildKey?: string | null;

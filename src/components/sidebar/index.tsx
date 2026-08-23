@@ -16,7 +16,7 @@ import {
 } from "../../stores/worktreeStore";
 import { useExternalSessionSyncStore } from "../../stores/externalSessionSyncStore";
 import type { TerminalPaneSplitDirection } from "../../stores/terminalPaneTree";
-import type { HistorySessionSummary, HistorySourceFilter, Project, TreeNode as TNode, Group, TerminalScope, TerminalSession, WorktreeRecord } from "../../lib/types";
+import type { HistorySessionView, HistorySourceFilter, Project, TreeNode as TNode, Group, TerminalScope, TerminalSession, WorktreeRecord } from "../../lib/types";
 import { ConfigModal } from "../ConfigModal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { useAppConfirm } from "../ui/useAppConfirm";
@@ -532,8 +532,8 @@ export function Sidebar({
   );
 
   const handleResumeHistorySession = useCallback(
-    (project: Project, session: HistorySessionSummary) => {
-      requestResume(session, session.title.trim() || session.session_id, project.id);
+    (project: Project, session: HistorySessionView) => {
+      requestResume(session, session.displayTitle, project.id);
     },
     [requestResume]
   );

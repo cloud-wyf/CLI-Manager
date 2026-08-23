@@ -10,6 +10,7 @@ import { ensureHistorySourceSettingsLoaded, getHistoryPathArgs, getHistoryPathAr
 import { inferSubagentParentSessionId } from "../lib/historySubagents";
 import { sameHistorySessionIdentity } from "../lib/historySessionIdentity";
 import { extractHistoryTitleCandidate, resolveHistoryDisplayTitle } from "../lib/historyTitle";
+import { getCurrentLanguage } from "../lib/i18n";
 import { useProjectStore } from "./projectStore";
 import { useSettingsStore } from "./settingsStore";
 import { useSshAgentIntegrationStore } from "./sshAgentIntegrationStore";
@@ -111,6 +112,9 @@ interface HistoryStore {
   focusedMessageSeq: number;
   metaMap: SessionMetaMap;
   generatedTitleMap: GeneratedTitleMap;
+  // 历史列表内容已变（当前由智能标题落库触发）。侧边栏的展开列表是 React 局部状态，
+  // store 够不到它的 reload，用这个版本号做通知。
+  historyListRevision: number;
   focusGlobalSearchSeq: number;
   focusSessionSearchSeq: number;
   indexStatus: HistoryIndexStatus;
@@ -152,6 +156,7 @@ interface HistoryStore {
   clearFocusedMessage: () => void;
   updateMeta: (sessionKey: string, patch: MetaPatchInput) => Promise<void>;
   cancelAutomaticSmartTitles: () => void;
+  autoTitleFromHook: (payload: HookTitleTrigger) => Promise<void>;
   generateSmartTitle: (sessionKey: string, triggerKind?: HistoryGeneratedTitleTrigger) => Promise<void>;
   clearSmartTitle: (sessionKey: string) => Promise<void>;
   updateMessage: (sessionKey: string, message: HistoryMessage, newText: string) => Promise<void>;
@@ -214,6 +219,13 @@ function findHistoryProject(projects: Project[], projectId: string | null, proje
     const historyPath = resolveHistoryProjectPath(item);
     return historyPath === normalizedPath || item.path.trim() === normalizedPath || item.remote_path.trim() === normalizedPath;
   });
+}
+
+/** Hook 侧触发自动命名所需的最小信息，避免 historyStore 依赖 terminalStore 的 payload 类型。 */
+export interface HookTitleTrigger {
+  source: HistorySource | null;
+  sessionId: string;
+  cwd: string | null;
 }
 
 function remoteSourceMatchesFilter(
@@ -913,6 +925,66 @@ export async function fetchRemoteHistoryStatsPayload(
   }
 }
 
+interface ResolveSessionSummaryOptions {
+  pathArgs: Awaited<ReturnType<typeof getHistoryPathArgs>>;
+  source: HistorySource | null;
+  projectPath: string | null;
+  cliSessionId: string;
+  forceCatalogRefresh: boolean;
+  waitForCatalogRefresh: boolean;
+}
+
+// 按 CLI sessionId 定位历史会话摘要，不触碰历史工作区选中状态。
+// 先按项目过滤找，失败再仅按 sessionId 找（Pi 等 cwd/project_key 口径与 Claude 不同）；
+// 仍 miss 时刷新 catalog 再试一轮，覆盖"会话刚建立、尚未入索引"的场景。
+async function resolveSessionSummaryByCliSessionId(
+  options: ResolveSessionSummaryOptions,
+): Promise<HistorySessionSummary | null> {
+  const { pathArgs, source, projectPath, cliSessionId, forceCatalogRefresh, waitForCatalogRefresh } = options;
+  const loadSummary = async (scopedProjectPath: string | null) => {
+    const summariesRaw = await invoke<unknown[]>("history_list_sessions", {
+      source: source ?? null,
+      ...pathArgs,
+      projectPath: scopedProjectPath,
+      query: cliSessionId,
+      limit: 1,
+      offset: 0,
+    });
+    const summary = (summariesRaw ?? []).map((item) => normalizeSummary(item))[0] ?? null;
+    logInfo("history.realtime.lookup.summary", {
+      source: source ?? null,
+      projectPath: scopedProjectPath,
+      query: cliSessionId,
+      cliSessionId,
+      found: Boolean(summary),
+      sessionId: summary?.session_id ?? null,
+      sessionProjectKey: summary?.project_key ?? null,
+      sessionFilePath: summary?.file_path ?? null,
+    });
+    return summary?.session_id === cliSessionId ? summary : null;
+  };
+
+  const scoped = await loadSummary(projectPath);
+  if (scoped) return scoped;
+  const unscoped = await loadSummary(null);
+  if (unscoped) return unscoped;
+  if (!forceCatalogRefresh) return null;
+  try {
+    await invoke("history_refresh_index", {
+      ...pathArgs,
+      wait: waitForCatalogRefresh,
+    });
+  } catch (error) {
+    logWarn("history.realtime.lookup.refreshFailed", {
+      source: source ?? null,
+      projectPath,
+      cliSessionId,
+      error: String(error),
+    });
+  }
+  return (await loadSummary(projectPath)) ?? (await loadSummary(null));
+}
+
 // 供终端统计面板使用：按项目路径取最近一次 CLI 会话详情，不改动历史工作区的选中状态。
 // source 非空时只匹配对应 CLI（claude/codex），供按终端工具区分的场景使用。
 // 传入 prev（上次结果的 file_path/updated_at）时，若最近会话未变化则返回 "unchanged"，
@@ -941,70 +1013,28 @@ export async function fetchLatestProjectSessionDetail(
       previousUpdatedAt: prev?.updatedAt ?? null,
     });
     const pathArgs = await getHistoryPathArgs();
-    const loadSummary = async (
-      query: string | null,
-      scopedProjectPath: string | null
-    ): Promise<HistorySessionSummary | null> => {
-      const summariesRaw = await invoke<unknown[]>("history_list_sessions", {
-        source: source ?? null,
-        ...pathArgs,
-        projectPath: scopedProjectPath,
-        query,
-        limit: 1,
-        offset: 0,
-      });
-      const summary = (summariesRaw ?? []).map((item) => normalizeSummary(item))[0] ?? null;
-      logInfo("history.realtime.lookup.summary", {
-        source: source ?? null,
-        projectPath: scopedProjectPath,
-        query,
-        cliSessionId: cliSessionId ?? null,
-        found: Boolean(summary),
-        sessionId: summary?.session_id ?? null,
-        sessionProjectKey: summary?.project_key ?? null,
-        sessionFilePath: summary?.file_path ?? null,
-      });
-      return summary;
-    };
-
-    // 绑定了 CLI sessionId 时：先按项目过滤找，失败再仅按 sessionId 找（Pi 等 cwd/project_key 口径与 Claude 不同）。
-    // 仍 miss 时后台刷新 catalog 再试一次；Grok 精确 sessionId 可由后端绕过 catalog 直接命中。
     const sessionQuery = cliSessionId?.trim() || null;
-    const resolveBoundSummary = async (): Promise<HistorySessionSummary | null> => {
-      if (!sessionQuery) {
-        return loadSummary(null, projectPath);
-      }
-      let summary = await loadSummary(sessionQuery, projectPath);
-      if (summary?.session_id === sessionQuery) return summary;
-      summary = await loadSummary(sessionQuery, null);
-      if (summary?.session_id === sessionQuery) return summary;
-      if (!forceCatalogRefresh) return null;
-      try {
-        await invoke("history_refresh_index", { ...pathArgs, wait: waitForCatalogRefresh });
-      } catch (error) {
-        logWarn("history.realtime.lookup.refreshFailed", {
-          source: source ?? null,
-          projectPath,
-          cliSessionId: sessionQuery,
-          error: String(error),
-        });
-      }
-      summary = await loadSummary(sessionQuery, projectPath);
-      if (summary?.session_id === sessionQuery) return summary;
-      summary = await loadSummary(sessionQuery, null);
-      return summary?.session_id === sessionQuery ? summary : null;
-    };
-
-    const summary = await resolveBoundSummary();
-    if (sessionQuery && summary?.session_id !== sessionQuery) {
-      logWarn("history.realtime.lookup.sessionMismatch", {
+    // 未绑定 sessionId 时退回"该项目最近一次会话"；绑定了就走共用的 sessionId 定位阶梯。
+    const summary = sessionQuery
+      ? await resolveSessionSummaryByCliSessionId({
+        pathArgs,
         source: source ?? null,
         projectPath,
         cliSessionId: sessionQuery,
-        foundSessionId: summary?.session_id ?? null,
-      });
-      return null;
-    }
+        forceCatalogRefresh,
+        waitForCatalogRefresh,
+      })
+      : await (async () => {
+        const summariesRaw = await invoke<unknown[]>("history_list_sessions", {
+          source: source ?? null,
+          ...pathArgs,
+          projectPath,
+          query: null,
+          limit: 1,
+          offset: 0,
+        });
+        return (summariesRaw ?? []).map((item) => normalizeSummary(item))[0] ?? null;
+      })();
     if (!summary) {
       logWarn("history.realtime.lookup.miss", {
         source: source ?? null,
@@ -1452,7 +1482,7 @@ function toViewWithGeneratedTitle(
   };
 }
 
-function applyMeta(
+function decorateSummaries(
   summaries: HistorySessionSummary[],
   metaMap: SessionMetaMap,
   generatedTitleMap: GeneratedTitleMap = {},
@@ -1480,7 +1510,28 @@ function applyMeta(
       metaBySourcePath.get(`${source}:${normalizeMetaPath(summary.file_path)}`);
     return toViewWithGeneratedTitle(summary, meta, generatedTitleMap[key]);
   });
-  return sortSessionViews(views);
+  return views;
+}
+
+function applyMeta(
+  summaries: HistorySessionSummary[],
+  metaMap: SessionMetaMap,
+  generatedTitleMap: GeneratedTitleMap = {},
+): HistorySessionView[] {
+  return sortSessionViews(decorateSummaries(summaries, metaMap, generatedTitleMap));
+}
+
+// 侧边栏等独立数据源复用同一套标题解析（alias > 智能标题 > 原始标题）。
+// 不排序：调用方的分页依赖后端返回顺序。
+export async function decorateHistorySummaries(
+  summaries: HistorySessionSummary[],
+): Promise<HistorySessionView[]> {
+  const state = useHistoryStore.getState();
+  const metaMap = Object.keys(state.metaMap).length > 0 ? state.metaMap : await readMetaMap();
+  const generatedTitleMap = Object.keys(state.generatedTitleMap).length > 0
+    ? state.generatedTitleMap
+    : await readGeneratedTitleMap();
+  return decorateSummaries(summaries, metaMap, generatedTitleMap);
 }
 
 function sortSessionViews(views: HistorySessionView[]): HistorySessionView[] {
@@ -2190,6 +2241,21 @@ function cancelAutomaticTitleQueue(): void {
   }
 }
 
+// Hook 每轮 Stop 都会到。值是该会话下次允许尝试的时间戳：占位防并发、失败后冷却、
+// 成功后置为 NEVER。用一个字段表达三种状态，避免和后端的重试策略各说各话。
+const hookTitleNextAttemptAt = new Map<string, number>();
+const HOOK_TITLE_INFLIGHT_GUARD_MS = 60_000;
+// 与后端 TRANSIENT_RETRY_BACKOFF_MS 对齐：限流/5xx 等瞬时故障过了这个窗口才值得重试。
+const HOOK_TITLE_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+const HOOK_TITLE_NEVER = Number.MAX_SAFE_INTEGER;
+
+function smartTitleSelection() {
+  const selection = useSettingsStore.getState().historySmartTitle;
+  if (!selection.enabled) return null;
+  if (!selection.providerAppType || !selection.providerId || !selection.modelId) return null;
+  return selection;
+}
+
 export const useHistoryStore = create<HistoryStore>((set, get) => ({
   isOpen: false,
   loadingSessions: false,
@@ -2223,6 +2289,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
   focusedMessageSeq: 0,
   metaMap: {},
   generatedTitleMap: {},
+  historyListRevision: 0,
   focusGlobalSearchSeq: 0,
   focusSessionSearchSeq: 0,
   indexStatus: { ...DEFAULT_HISTORY_INDEX_STATUS },
@@ -3412,6 +3479,153 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     cancelAutomaticTitleQueue();
   },
 
+  // CLI Hook 的 Stop 事件驱动的自动命名。与浏览路径（queueAutomaticTitle）并行存在，
+  // 区别在于：全程不触碰历史工作区选中状态，且不检查 enabledAt 水位线——
+  // hook 报上来的必然是此刻正在本应用里跑的会话，比文件创建时间准确，也覆盖 --resume 老会话。
+  autoTitleFromHook: async (trigger) => {
+    const cliSessionId = trigger.sessionId.trim();
+    const settings = useSettingsStore.getState().historySmartTitle;
+    logInfo("history.smartTitle.hook.enter", {
+      cliSessionId,
+      source: trigger.source,
+      cwd: trigger.cwd,
+      enabled: settings.enabled,
+      providerAppType: settings.providerAppType,
+      providerId: settings.providerId,
+      modelId: settings.modelId,
+    });
+    const selection = smartTitleSelection();
+    if (!selection) {
+      logWarn("history.smartTitle.hook.noSelection", {
+        enabled: settings.enabled,
+        missing: [
+          settings.providerAppType ? null : "providerAppType",
+          settings.providerId ? null : "providerId",
+          settings.modelId ? null : "modelId",
+        ].filter(Boolean),
+      });
+      return;
+    }
+    const nextAttemptAt = hookTitleNextAttemptAt.get(cliSessionId);
+    if (!cliSessionId || (nextAttemptAt !== undefined && Date.now() < nextAttemptAt)) {
+      logInfo("history.smartTitle.hook.skipped", {
+        cliSessionId,
+        reason: cliSessionId ? "cooldown" : "emptySessionId",
+        nextAttemptAt: nextAttemptAt ?? null,
+      });
+      return;
+    }
+    hookTitleNextAttemptAt.set(cliSessionId, Date.now() + HOOK_TITLE_INFLIGHT_GUARD_MS);
+    try {
+      const pathArgs = await getHistoryPathArgs();
+      logInfo("history.smartTitle.hook.lookupStart", { cliSessionId, pathArgs, projectPath: trigger.cwd?.trim() || null });
+      const summary = await resolveSessionSummaryByCliSessionId({
+        pathArgs,
+        source: trigger.source,
+        projectPath: trigger.cwd?.trim() || null,
+        cliSessionId,
+        forceCatalogRefresh: true,
+        waitForCatalogRefresh: true,
+      });
+      if (!summary) {
+        // 会话尚未入索引：放行下一轮 Stop 重试。
+        logWarn("history.smartTitle.hook.summaryNotFound", { cliSessionId, source: trigger.source, projectPath: trigger.cwd?.trim() || null });
+        hookTitleNextAttemptAt.delete(cliSessionId);
+        return;
+      }
+      const sessionKey = summarySessionKey(summary);
+      logInfo("history.smartTitle.hook.summaryResolved", {
+        cliSessionId,
+        sessionKey,
+        filePath: summary.file_path,
+        source: summary.source,
+        projectKey: summary.project_key,
+        sessionId: summary.session_id,
+      });
+      const generated = get().generatedTitleMap[sessionKey] ?? (await readGeneratedTitleMap())[sessionKey];
+      logInfo("history.smartTitle.hook.existingMeta", {
+        sessionKey,
+        state: generated?.state ?? null,
+        failureCode: generated?.failureCode ?? null,
+        autoSuppressed: generated?.autoSuppressed ?? null,
+        revision: generated?.revision ?? null,
+      });
+      if (generated?.state === "succeeded") {
+        hookTitleNextAttemptAt.set(cliSessionId, HOOK_TITLE_NEVER);
+        return;
+      }
+
+      const detailRaw = await invoke<unknown>("history_get_session", {
+        filePath: summary.file_path,
+        ...pathArgs,
+        source: summary.source,
+        projectKey: summary.project_key,
+      });
+      const detail = normalizeDetail(detailRaw);
+      const candidate = await extractHistoryTitleCandidate(detail, sessionKey);
+      if (!candidate) {
+        logWarn("history.smartTitle.hook.noCandidate", { sessionKey, messageCount: detail.messages.length });
+        return;
+      }
+      logInfo("history.smartTitle.hook.candidate", {
+        sessionKey,
+        textLength: candidate.text.length,
+        identity: candidate.identity,
+        contentSha256: candidate.contentSha256.slice(0, 12),
+      });
+
+      logInfo("history.smartTitle.hook.invoke", {
+        sessionKey,
+        providerAppType: selection.providerAppType,
+        providerId: selection.providerId,
+        modelId: selection.modelId,
+        language: getCurrentLanguage(),
+      });
+      const raw = await invoke<unknown>("history_title_generate", {
+        request: {
+          sessionKey,
+          sourceId: summary.session_ref?.sourceId ?? summary.source,
+          sourceInstanceId: summary.session_ref?.sourceInstanceId ?? summary.file_path,
+          sourceSessionId: summary.session_ref?.sourceSessionId ?? summary.session_id,
+          transportKind: summary.session_ref?.transportKind ?? "local",
+          sourceMessageIdentity: candidate.identity,
+          sourceContentSha256: candidate.contentSha256,
+          candidateTextSha256: candidate.inputContentSha256,
+          candidateText: candidate.text,
+          triggerKind: "automatic",
+          providerAppType: selection.providerAppType,
+          providerId: selection.providerId,
+          modelId: selection.modelId,
+          language: getCurrentLanguage(),
+        },
+      });
+      const meta = normalizeGeneratedTitleResponse(raw);
+      if (!meta) {
+        logWarn("history.smartTitle.hook.badResponse", { sessionKey, raw: JSON.stringify(raw).slice(0, 300) });
+        return;
+      }
+      logInfo("history.smartTitle.hook.result", {
+        sessionKey,
+        state: meta.state,
+        title: meta.title,
+        failureCode: meta.failureCode,
+        revision: meta.revision,
+      });
+      set((state) => ({
+        generatedTitleMap: { ...state.generatedTitleMap, [sessionKey]: meta },
+        sessions: state.sessions.map((view) =>
+          view.sessionKey === sessionKey ? generatedTitleView(view, meta) : view
+        ),
+        historyListRevision: state.historyListRevision + 1,
+      }));
+      hookTitleNextAttemptAt.set(cliSessionId, HOOK_TITLE_NEVER);
+    } catch (error) {
+      hookTitleNextAttemptAt.set(cliSessionId, Date.now() + HOOK_TITLE_RETRY_COOLDOWN_MS);
+      // 自动触发对用户静默；失败与 revision 已由后端持久化，配置改对后可自动重试。
+      logWarn("history.smartTitle.hook.failed", { cliSessionId, error: String(error) });
+    }
+  },
+
   generateSmartTitle: async (sessionKey, triggerKind = "manual") => {
     if (triggerKind === "automatic" && !useSettingsStore.getState().historySmartTitle.enabled) {
       throw new Error("history_title_auto_disabled");
@@ -3468,6 +3682,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
           providerAppType: selection.providerAppType,
           providerId: selection.providerId,
           modelId: selection.modelId,
+          language: getCurrentLanguage(),
         },
       });
       const meta = normalizeGeneratedTitleResponse(raw);

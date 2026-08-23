@@ -136,7 +136,7 @@ function ProjectHistoryChildren({
     <>
       {state.sessions.map((session) => {
         const treeKey = historySessionTreeKey(project.id, session);
-        const title = session.title.trim() || session.session_id;
+        const title = session.displayTitle;
         const time = formatTime(session.updated_at, language);
         const iconKey = resolveHistorySourceIconKey(session.source);
         return (
