@@ -3485,15 +3485,6 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
   autoTitleFromHook: async (trigger) => {
     const cliSessionId = trigger.sessionId.trim();
     const settings = useSettingsStore.getState().historySmartTitle;
-    logInfo("history.smartTitle.hook.enter", {
-      cliSessionId,
-      source: trigger.source,
-      cwd: trigger.cwd,
-      enabled: settings.enabled,
-      providerAppType: settings.providerAppType,
-      providerId: settings.providerId,
-      modelId: settings.modelId,
-    });
     const selection = smartTitleSelection();
     if (!selection) {
       logWarn("history.smartTitle.hook.noSelection", {
@@ -3518,7 +3509,6 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     hookTitleNextAttemptAt.set(cliSessionId, Date.now() + HOOK_TITLE_INFLIGHT_GUARD_MS);
     try {
       const pathArgs = await getHistoryPathArgs();
-      logInfo("history.smartTitle.hook.lookupStart", { cliSessionId, pathArgs, projectPath: trigger.cwd?.trim() || null });
       const summary = await resolveSessionSummaryByCliSessionId({
         pathArgs,
         source: trigger.source,
@@ -3534,22 +3524,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
         return;
       }
       const sessionKey = summarySessionKey(summary);
-      logInfo("history.smartTitle.hook.summaryResolved", {
-        cliSessionId,
-        sessionKey,
-        filePath: summary.file_path,
-        source: summary.source,
-        projectKey: summary.project_key,
-        sessionId: summary.session_id,
-      });
       const generated = get().generatedTitleMap[sessionKey] ?? (await readGeneratedTitleMap())[sessionKey];
-      logInfo("history.smartTitle.hook.existingMeta", {
-        sessionKey,
-        state: generated?.state ?? null,
-        failureCode: generated?.failureCode ?? null,
-        autoSuppressed: generated?.autoSuppressed ?? null,
-        revision: generated?.revision ?? null,
-      });
       if (generated?.state === "succeeded") {
         hookTitleNextAttemptAt.set(cliSessionId, HOOK_TITLE_NEVER);
         return;
@@ -3567,20 +3542,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
         logWarn("history.smartTitle.hook.noCandidate", { sessionKey, messageCount: detail.messages.length });
         return;
       }
-      logInfo("history.smartTitle.hook.candidate", {
-        sessionKey,
-        textLength: candidate.text.length,
-        identity: candidate.identity,
-        contentSha256: candidate.contentSha256.slice(0, 12),
-      });
 
-      logInfo("history.smartTitle.hook.invoke", {
-        sessionKey,
-        providerAppType: selection.providerAppType,
-        providerId: selection.providerId,
-        modelId: selection.modelId,
-        language: getCurrentLanguage(),
-      });
       const raw = await invoke<unknown>("history_title_generate", {
         request: {
           sessionKey,

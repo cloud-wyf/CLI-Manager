@@ -857,22 +857,14 @@ function App() {
         return;
       }
       const boundTabId = useTerminalStore.getState().handleCliHookEvent(event.payload);
-      logInfo("history.smartTitle.hook.event", {
-        event: event.payload.event,
-        source: event.payload.source ?? null,
-        environmentType: event.payload.environmentType ?? null,
-        sessionId: event.payload.sessionId?.trim() || null,
-        cwd: event.payload.cwd ?? null,
-      });
       // 一轮对话结束：驱动历史会话智能标题。远程会话的历史需要 remoteContext，hook 路径拿不到，跳过。
       if (event.payload.event === "Stop") {
         const hookSessionId = event.payload.sessionId?.trim() ?? "";
         if (event.payload.environmentType === "ssh") {
-          logWarn("history.smartTitle.hook.stopSkipped", { reason: "ssh", source: event.payload.source ?? null });
+          logInfo("history.smartTitle.hook.stopSkipped", { reason: "ssh", source: event.payload.source ?? null });
         } else if (!hookSessionId) {
           logWarn("history.smartTitle.hook.stopSkipped", { reason: "missingSessionId", source: event.payload.source ?? null });
         } else {
-          logInfo("history.smartTitle.hook.stopAccepted", { source: event.payload.source ?? null, sessionId: hookSessionId, cwd: event.payload.cwd ?? null });
           void useHistoryStore.getState().autoTitleFromHook({
             source: event.payload.source ?? null,
             sessionId: hookSessionId,
