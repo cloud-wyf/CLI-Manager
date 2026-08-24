@@ -623,7 +623,7 @@ export function ProjectTree({
 
   if (initialLoading) {
     return (
-      <div className="h-full overflow-y-auto overflow-x-hidden px-1.5 pb-2 pt-1">
+      <div className="ui-tree-scroll h-full overflow-y-auto overflow-x-hidden px-1.5 pb-2 pt-1">
         <SidebarSkeleton />
       </div>
     );
@@ -632,7 +632,7 @@ export function ProjectTree({
   if (collapsed) {
     const buttonSize = density === "compact" ? "h-7 w-7" : "h-8 w-8";
     return (
-      <div className={`h-full overflow-y-auto overflow-x-hidden ${density === "compact" ? "px-0.5 pb-1.5 pt-0.5" : "px-1 pb-2 pt-1"}`}>
+      <div className={`ui-tree-scroll h-full overflow-y-auto overflow-x-hidden ${density === "compact" ? "px-0.5 pb-1.5 pt-0.5" : "px-1 pb-2 pt-1"}`}>
         {tree.length === 0 ? (
           <div className={`flex flex-col items-center text-text-muted ${density === "compact" ? "gap-1.5 py-2.5" : "gap-2 py-3"}`}>
             <Terminal size={20} strokeWidth={1.2} className="opacity-50" />
@@ -666,7 +666,7 @@ export function ProjectTree({
   }
 
   return (
-    <div className={`${embedded ? "" : "flex h-full flex-col overflow-y-auto"} overflow-x-hidden ${density === "compact" ? "px-1 pb-1.5 pt-0.5" : "px-1.5 pb-2 pt-1"}`}>
+    <div className={`${embedded ? "" : "ui-tree-scroll flex h-full flex-col overflow-y-auto"} overflow-x-hidden ${density === "compact" ? "px-1 pb-1.5 pt-0.5" : "px-1.5 pb-2 pt-1"}`}>
       {newGroupParentId === "__root__" && (
         <div className={`flex items-center px-2 ${density === "compact" ? "gap-1 py-1" : "gap-1.5 py-1.5"}`}>
           <span className="shrink-0 text-accent">

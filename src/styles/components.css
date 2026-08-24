@@ -1514,6 +1514,35 @@
   color: var(--text-muted);
 }
 
+/* 只有独立热区的箭头需要放大和反馈：分组行的箭头是整行点击的指示器，热区本来就是整行。 */
+button.ui-tree-chevron {
+  width: 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background-color var(--animate-duration-fast),
+    color var(--animate-duration-fast);
+}
+
+button.ui-tree-chevron:hover {
+  background-color: color-mix(in srgb, var(--surface-container-lowest) 68%, transparent);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] button.ui-tree-chevron:hover {
+  background-color: color-mix(in srgb, var(--surface-container-highest) 24%, transparent);
+}
+
+button.ui-tree-chevron:active {
+  background-color: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+/* 滚动条出现/消失不能改变内容宽度：贴行尾的箭头只有 20px 宽，10px 的位移足够让鼠标完全脱靶。 */
+.ui-tree-scroll {
+  scrollbar-gutter: stable;
+}
+
 .ui-tree-status-dot {
   box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
 }

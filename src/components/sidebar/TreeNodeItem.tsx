@@ -408,7 +408,7 @@ function TreeNodeItemImpl({
             >
               <ChevronRight
                 size={12}
-                strokeWidth={2}
+                strokeWidth={2.5}
                 style={{ transition: "transform 150ms", transform: worktreesOpen ? "rotate(90deg)" : "rotate(0)" }}
               />
             </button>
@@ -468,7 +468,7 @@ function TreeNodeItemImpl({
             >
               <ChevronRight
                 size={12}
-                strokeWidth={2}
+                strokeWidth={2.5}
                 style={{ transition: "transform 150ms", transform: historyOpen ? "rotate(90deg)" : "rotate(0)" }}
               />
             </button>
