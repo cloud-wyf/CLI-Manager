@@ -506,7 +506,7 @@ const DEFAULTS: Settings = {
   fontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollbackCustomEnabled: false,
   terminalScrollbackRows: TERMINAL_SCROLLBACK_ROWS_DEFAULT,
-  fontFamily: "Cascadia Code, Consolas, monospace",
+  fontFamily: "Maple Mono Normal NL NF CN, Cascadia Code, Consolas, monospace",
   terminalTextColor: "",
   terminalTuiUserColor: "",
   terminalTuiAssistantColor: "",

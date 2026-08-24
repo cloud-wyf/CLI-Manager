@@ -15,6 +15,7 @@ export interface TerminalThemePreset {
   group: TerminalThemeGroupId;
   family?: string;
   tone?: "light" | "dark";
+  minimumContrastRatio?: number;
 }
 
 export const TERMINAL_THEME_GROUPS: TerminalThemeGroup[] = [
@@ -68,13 +69,6 @@ export function withTerminalTextColor(theme: ITheme, textColor: string): ITheme 
 
 export function getTerminalBackgroundOverlayColor(theme: ITheme): string {
   return isLightTerminalTheme(theme) ? "255, 255, 255" : "0, 0, 0";
-}
-
-export function getTerminalMinimumContrastRatio(theme: ITheme, backgroundImageEnabled = false): number {
-  const themeMinimumContrastRatio = isLightTerminalTheme(theme) ? 6 : 1;
-  return backgroundImageEnabled
-    ? Math.max(themeMinimumContrastRatio, TERMINAL_BACKGROUND_IMAGE_MINIMUM_CONTRAST_RATIO)
-    : themeMinimumContrastRatio;
 }
 
 function applyBackgroundImageForegroundContrast(theme: ITheme, isLight: boolean): ITheme {
@@ -1402,29 +1396,31 @@ const windowsTerminalVintage: ITheme = {
   brightWhite: "#FFFFFF",
 };
 
-// Claude Light — 色相取自 claude-style 的 Claude Light 规范（背景/前景/强调/选中为规范原值）。
-// ANSI 色需满足浅色主题强制的 minimumContrastRatio 6，故按规范色相压深：
-// normal 目标 6.2:1，bright 目标 9.0:1 —— 两档分开才能让 bright 与 normal 视觉可分。
+// Claude Light — 色相与饱和度取自 claude-style 的 Claude Light 规范。
+// 规范色板是低对比纸感设计（18 个前景色里 16 个低于 4.1:1，brightWhite 与背景同色、
+// blue 仅 1.21:1，照搬会有隐形色位），故保色相压深到 normal 4.5:1 / bright 7.0:1。
+// 规范原值本就达标的（magenta 5.06:1）原样保留。阈值由 preset 的
+// minimumContrastRatio 声明，不再走背景亮度推断——否则会被全局的 6 再拉一遍。
 const claudeLight: ITheme = {
   background: "#faf9f5",
   foreground: "#3c2f23",
-  cursor: "#96462b",
+  cursor: "#b85635",
   selectionBackground: "#e8ddd0",
   black: "#3c2f23",
-  red: "#96462b",
-  green: "#326936",
-  yellow: "#795807",
-  blue: "#145ea7",
-  magenta: "#794f7a",
-  cyan: "#00686d",
-  white: "#645c53",
-  brightBlack: "#4a453e",
-  brightRed: "#713420",
-  brightGreen: "#254e28",
-  brightYellow: "#5a4105",
-  brightBlue: "#0f477c",
-  brightMagenta: "#5a3b5b",
-  brightCyan: "#004e52",
+  red: "#b85635",
+  green: "#6e7748",
+  yellow: "#946c09",
+  blue: "#40789c",
+  magenta: "#8b5a8c",
+  cyan: "#5b7878",
+  white: "#787263",
+  brightBlack: "#5b544b",
+  brightRed: "#8e3d22",
+  brightGreen: "#525939",
+  brightYellow: "#6c5116",
+  brightBlue: "#3f5871",
+  brightMagenta: "#714771",
+  brightCyan: "#425a5a",
   brightWhite: "#3c2f23",
 };
 
@@ -1470,7 +1466,7 @@ export const TERMINAL_THEME_PRESETS: TerminalThemePreset[] = [
   { id: "rosePineMoon", name: "Rosé Pine Moon", theme: rosePineMoon, group: "pink-purple", family: "rose-pine", tone: "dark" },
   { id: "rosePineDawn", name: "Rosé Pine Dawn", theme: rosePineDawn, group: "pink-purple", family: "rose-pine", tone: "light" },
   { id: "dawnfox", name: "Dawnfox", theme: dawnfox, group: "light-office", family: "nightfox", tone: "light" },
-  { id: "claudeLight", name: "Claude Light", theme: claudeLight, group: "light-office", family: "claude", tone: "light" },
+  { id: "claudeLight", name: "Claude Light", theme: claudeLight, group: "light-office", family: "claude", tone: "light", minimumContrastRatio: 4.5 },
   { id: "kanagawaWave", name: "Kanagawa Wave", theme: kanagawaWave, group: "warm", family: "kanagawa", tone: "dark" },
   { id: "kanagawaDragon", name: "Kanagawa Dragon", theme: kanagawaDragon, group: "nature", family: "kanagawa", tone: "dark" },
   { id: "ayuDark", name: "Ayu Dark", theme: ayuDark, group: "warm", family: "ayu", tone: "dark" },
@@ -1568,6 +1564,25 @@ export function getTerminalBackground(
   darkPalette: DarkTerminalPalette = "night-indigo"
 ): string {
   return getTerminalTheme(themeName, resolvedTheme, lightPalette, darkPalette).background!;
+}
+
+/**
+ * 主题可以用 preset 的 minimumContrastRatio 声明自己的下限；没声明的沿用
+ * 「浅色 6 / 深色 1」推断。背景图开启时仍强制抬到 6——图上的字需要更高对比。
+ */
+export function getTerminalThemeMinimumContrastRatio(
+  themeName: string,
+  resolvedTheme: "dark" | "light",
+  lightPalette: LightTerminalPalette = "warm-paper",
+  darkPalette: DarkTerminalPalette = "night-indigo",
+  backgroundImageEnabled = false
+): number {
+  const id = resolveTerminalThemeId(themeName, resolvedTheme, lightPalette, darkPalette);
+  const declared = themePresetMap.get(id)?.minimumContrastRatio;
+  const base = declared ?? (isLightTerminalTheme(themeMap.get(id) ?? warmPaperLight) ? 6 : 1);
+  return backgroundImageEnabled
+    ? Math.max(base, TERMINAL_BACKGROUND_IMAGE_MINIMUM_CONTRAST_RATIO)
+    : base;
 }
 
 /**

@@ -1,0 +1,249 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1030" width="1800" height="1030" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif">
+  <title>CLI-Manager 界面结构图（Claude Light 主题）</title>
+
+  <defs>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#3c2f23" flood-opacity="0.06"/>
+    </filter>
+    <filter id="winShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="14" flood-color="#3c2f23" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#847a6d"/>
+    </marker>
+    <clipPath id="sbClip"><rect x="68" y="128" width="250" height="654" rx="8"/></clipPath>
+    <clipPath id="wellClip"><rect x="326" y="128" width="918" height="654" rx="8"/></clipPath>
+  </defs>
+
+  <rect width="1800" height="1030" fill="#eeece4"/>
+
+  <text x="60" y="42" font-size="21" font-weight="700" fill="#3c2f23">CLI-Manager — 界面结构</text>
+  <text x="60" y="66" font-size="13" fill="#847a6d">主题 Claude Light · 窗口 decorations:false（标题栏由应用自绘）· 尺寸标注为真实 CSS 像素</text>
+
+  <!-- ══════════ 窗口（内部沿用原始坐标，整体右移 220 居中） ══════════ -->
+  <g transform="translate(220,0)">
+    <g filter="url(#winShadow)">
+      <rect x="60" y="90" width="1240" height="700" rx="10" fill="#faf9f5"/>
+    </g>
+
+    <!-- 标题栏：无自有底色，底板直接透上来 -->
+    <rect x="76" y="99" width="16" height="16" rx="3" fill="#c96442"/>
+    <text x="102" y="112" font-size="13" font-weight="600" fill="#3c2f23">CLI-Manager</text>
+    <g stroke="#5c5044" stroke-width="1.3" fill="none">
+      <path d="M 1180 107 h 11"/>
+      <rect x="1219" y="102" width="10" height="10" rx="1.5"/>
+      <path d="M 1258 102 l 11 11 M 1269 102 l -11 11"/>
+    </g>
+
+    <!-- 侧边栏卡片 -->
+    <g filter="url(#cardShadow)">
+      <rect x="68" y="128" width="250" height="654" rx="8" fill="#ffffff" stroke="#d8cfc0" stroke-opacity="0.62"/>
+    </g>
+    <g clip-path="url(#sbClip)">
+      <rect x="68" y="128" width="250" height="42" fill="#faf9f5" fill-opacity="0.82"/>
+      <line x1="68" y1="170" x2="318" y2="170" stroke="#d8cfc0" stroke-opacity="0.5"/>
+      <text x="82" y="154" font-size="12.5" font-weight="600" fill="#3c2f23">项目</text>
+      <g fill="none" stroke="#5c5044" stroke-width="1.2">
+        <path d="M 196 144 l -4 5 l 4 5"/>
+        <rect x="212" y="142" width="13" height="10" rx="2"/>
+      </g>
+      <rect x="238" y="140" width="56" height="19" rx="6" fill="#c96442"/>
+      <text x="266" y="153.5" font-size="11" font-weight="600" fill="#ffffff" text-anchor="middle">+ 新建</text>
+
+      <g font-size="12" fill="#3c2f23">
+        <g transform="translate(0,190)">
+          <circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/>
+          <text x="102" y="4">.claude</text>
+        </g>
+        <g transform="translate(0,218)">
+          <circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/>
+          <text x="102" y="4">Notes</text>
+          <circle cx="160" cy="0" r="7" fill="#e8ddd0"/>
+          <text x="160" y="3.5" font-size="9" fill="#5c5044" text-anchor="middle">1</text>
+        </g>
+        <g transform="translate(0,246)">
+          <circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/>
+          <text x="102" y="4">claude-style</text>
+        </g>
+
+        <rect x="76" y="262" width="234" height="26" rx="7" fill="#e8ddd0"/>
+        <g transform="translate(0,278)">
+          <circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/>
+          <text x="102" y="4" font-weight="600">CLI-Manager</text>
+          <circle cx="186" cy="0" r="7" fill="#faf9f5"/>
+          <text x="186" y="3.5" font-size="9" fill="#5c5044" text-anchor="middle">1</text>
+        </g>
+        <g font-size="11" fill="#5c5044">
+          <g transform="translate(0,304)"><circle cx="102" cy="0" r="3.5" fill="none" stroke="#c96442" stroke-width="1.1"/><text x="114" y="3.5">本地已经安装了这…</text><text x="300" y="3.5" font-size="9.5" fill="#847a6d" text-anchor="end">08/03 22:59</text></g>
+          <g transform="translate(0,326)"><circle cx="102" cy="0" r="3.5" fill="none" stroke="#c96442" stroke-width="1.1"/><text x="114" y="3.5">https://github.co…</text><text x="300" y="3.5" font-size="9.5" fill="#847a6d" text-anchor="end">08/03 22:57</text></g>
+          <g transform="translate(0,348)"><circle cx="102" cy="0" r="3.5" fill="none" stroke="#c96442" stroke-width="1.1"/><text x="114" y="3.5">当前项目的远程是…</text><text x="300" y="3.5" font-size="9.5" fill="#847a6d" text-anchor="end">08/03 22:56</text></g>
+          <g transform="translate(0,370)"><circle cx="102" cy="0" r="3.5" fill="none" stroke="#c96442" stroke-width="1.1"/><text x="114" y="3.5">d92690dd-4bde-4…</text><text x="300" y="3.5" font-size="9.5" fill="#847a6d" text-anchor="end">08/02 19:55</text></g>
+        </g>
+
+        <g transform="translate(0,400)">
+          <path d="M 83 -4 l 5 4 l -5 4" fill="none" stroke="#c96442" stroke-width="1.3"/>
+          <text x="102" y="4">proxy</text>
+          <circle cx="146" cy="0" r="7" fill="#e8ddd0"/>
+          <text x="146" y="3.5" font-size="9" fill="#5c5044" text-anchor="middle">1</text>
+        </g>
+        <text x="114" y="426" font-size="11" fill="#847a6d">暂无历史会话</text>
+        <g transform="translate(0,452)"><circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/><text x="102" y="4">script-shell</text></g>
+        <g transform="translate(0,480)"><circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/><text x="102" y="4">temp</text></g>
+        <g transform="translate(0,508)"><circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/><text x="102" y="4">WinCapKit</text></g>
+        <g transform="translate(0,536)"><circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/><text x="102" y="4">WinEnvHosts</text></g>
+        <g transform="translate(0,564)"><circle cx="86" cy="0" r="4.5" fill="none" stroke="#c96442" stroke-width="1.3"/><text x="102" y="4">WorkSpace</text></g>
+      </g>
+
+      <rect x="68" y="742" width="250" height="40" fill="#faf9f5" fill-opacity="0.78"/>
+      <line x1="68" y1="742" x2="318" y2="742" stroke="#d8cfc0" stroke-opacity="0.5"/>
+      <text x="98" y="766" font-size="11" fill="#847a6d">00:12</text>
+      <circle cx="196" cy="762" r="11" fill="#f5f4ed"/>
+      <circle cx="226" cy="762" r="11" fill="#3c7f41"/>
+      <circle cx="256" cy="762" r="11" fill="#f5f4ed"/>
+    </g>
+
+    <!-- 终端卡片：标签栏是它的顶部区域，不是浮在上面的第二张卡片 -->
+    <g filter="url(#cardShadow)">
+      <rect x="326" y="128" width="918" height="654" rx="8" fill="#faf9f5" stroke="#d8cfc0" stroke-opacity="0.45"/>
+    </g>
+    <g clip-path="url(#wellClip)">
+      <rect x="326" y="128" width="918" height="42" fill="#f5f4ed"/>
+      <line x1="326" y1="170" x2="1244" y2="170" stroke="#d8cfc0" stroke-opacity="0.55"/>
+    </g>
+    <g font-size="11.5">
+      <rect x="338" y="137" width="112" height="24" rx="7" fill="#faf9f5"/>
+      <circle cx="352" cy="149" r="3.5" fill="#847a6d"/>
+      <text x="366" y="153" fill="#5c5044">proxy</text>
+
+      <rect x="458" y="137" width="130" height="24" rx="7" fill="#e8ddd0"/>
+      <circle cx="472" cy="149" r="3.5" fill="#c96442"/>
+      <text x="486" y="153" fill="#3c2f23" font-weight="600">CLI-Manager</text>
+      <path d="M 570 145 l 7 7 M 577 145 l -7 7" stroke="#5c5044" stroke-width="1.2" fill="none"/>
+
+      <rect x="596" y="137" width="106" height="24" rx="7" fill="#faf9f5"/>
+      <circle cx="610" cy="149" r="3.5" fill="#847a6d"/>
+      <text x="624" y="153" fill="#5c5044">Notes</text>
+
+      <path d="M 1216 143 v 12 M 1210 149 h 12" stroke="#5c5044" stroke-width="1.4" fill="none"/>
+    </g>
+
+    <!-- 终端内容 -->
+    <g clip-path="url(#wellClip)" font-family="'Cascadia Mono', Consolas, monospace" font-size="11.5">
+      <text x="344" y="208" fill="#c96442">&gt;</text><text x="362" y="208" fill="#5c5044">/compact</text>
+      <text x="362" y="228" fill="#847a6d">L  Read src\stores\updateStore.ts (299 lines)</text>
+      <text x="344" y="256" fill="#c96442">&gt;</text><text x="376" y="256" fill="#3c2f23">当前为什么打开软件之后最上层有一块状态栏和整个软件的页面风格不符</text>
+      <text x="362" y="284" fill="#847a6d">Thought for 4m 54s, searched for 8 patterns, read 4 files</text>
+      <circle cx="348" cy="308" r="3.5" fill="#3c2f23"/>
+      <text x="362" y="312" fill="#3c2f23">查清了。那块是自定义标题栏，不是系统的——</text>
+      <text x="362" y="332" fill="#3c2f23">tauri.conf.json:18 里 decorations: false。</text>
+      <text x="362" y="366" fill="#3c2f23" font-weight="700">不搭的原因：色温差</text>
+
+      <rect x="362" y="384" width="518" height="76" fill="none" stroke="#d8cfc0"/>
+      <line x1="362" y1="410" x2="880" y2="410" stroke="#d8cfc0"/>
+      <line x1="362" y1="435" x2="880" y2="435" stroke="#d8cfc0"/>
+      <line x1="500" y1="384" x2="500" y2="460" stroke="#d8cfc0"/>
+      <line x1="720" y1="384" x2="720" y2="460" stroke="#d8cfc0"/>
+      <text x="376" y="402" fill="#5c5044">区域</text><text x="514" y="402" fill="#5c5044">变量</text><text x="734" y="402" fill="#5c5044">实际值</text>
+      <text x="376" y="427" fill="#3c2f23">标题栏</text><text x="514" y="427" fill="#5c5044">--surface-container-lowest</text><text x="734" y="427" fill="#c96442">#ffffff</text>
+      <text x="376" y="452" fill="#3c2f23">主体</text><text x="514" y="452" fill="#5c5044">--surface</text><text x="734" y="452" fill="#c96442">#faf9f5</text>
+      <text x="362" y="486" fill="#5c5044">components.css:1830 …</text>
+
+      <line x1="344" y1="700" x2="1226" y2="700" stroke="#d8cfc0" stroke-opacity="0.7"/>
+      <text x="344" y="726" fill="#c96442">&gt;</text>
+      <rect x="366" y="716" width="8" height="14" fill="#3c2f23"/>
+      <line x1="344" y1="744" x2="1226" y2="744" stroke="#d8cfc0" stroke-opacity="0.7"/>
+      <text x="344" y="766" fill="#5c5044">Opus 5 [high] | D:\Development\WorkSpace\CLI-Manager | master | 113K/1.0M (11%)</text>
+    </g>
+
+    <!-- 右侧竖排工具栏 -->
+    <g stroke="#5c5044" stroke-width="1.3" fill="none">
+      <g transform="translate(1272,150)"><ellipse cx="0" cy="0" rx="8" ry="5"/><circle cx="0" cy="0" r="2.2"/></g>
+      <g transform="translate(1272,196)"><rect x="-7" y="-6" width="14" height="12" rx="2"/><path d="M -1 -6 v 12"/></g>
+      <g transform="translate(1272,242)"><path d="M -6 -6 h 5 M -6 -6 v 5 M 6 6 h -5 M 6 6 v -5" stroke-linecap="round"/><path d="M -6 -6 l 12 12"/></g>
+      <g transform="translate(1272,288)"><circle cx="0" cy="0" r="7"/><path d="M 0 -4 v 4 l 3 2"/></g>
+      <g transform="translate(1272,334)"><path d="M -7 -4 h 5 l 2 2 h 7 v 8 h -14 z"/></g>
+      <g transform="translate(1272,380)"><circle cx="-4" cy="-5" r="2.4"/><circle cx="-4" cy="5" r="2.4"/><circle cx="5" cy="0" r="2.4"/><path d="M -4 -3 v 6 M -2 -4 l 5 3"/></g>
+      <g transform="translate(1272,426)"><path d="M -7 6 v -7 M -2 6 v -11 M 3 6 v -4 M 8 6 v -9"/></g>
+      <g transform="translate(1272,472)"><path d="M 0 -7 l 8 4 l -8 4 l -8 -4 z"/><path d="M -8 2 l 8 4 l 8 -4"/></g>
+    </g>
+  </g>
+
+  <!-- ══════════ 标注 ══════════ -->
+  <g stroke="#847a6d" stroke-width="1" fill="none" marker-end="url(#arrow)">
+    <path d="M 1540 107 H 1500"/>
+    <path d="M 1540 300 H 1500"/>
+    <path d="M 1540 520 H 1470"/>
+    <path d="M 260 160 H 286"/>
+    <path d="M 260 340 H 292"/>
+    <path d="M 1005 112 V 126"/>
+    <path d="M 1000 838 V 794"/>
+    <path d="M 542 862 V 794"/>
+  </g>
+
+  <g font-size="11.5" fill="#5c5044">
+    <text x="1548" y="98" font-weight="600" fill="#3c2f23">① 自绘标题栏 · h=26px</text>
+    <text x="1548" y="116">背景 transparent，底板色透上来</text>
+    <text x="1548" y="132">图标 + 应用名 + 最小化/最大化/关闭</text>
+    <text x="1548" y="148">整条 data-tauri-drag-region 可拖拽</text>
+
+    <text x="1548" y="291" font-weight="600" fill="#3c2f23">⑤ 竖排工具栏</text>
+    <text x="1548" y="309">预览 · 分屏 · 全屏 · 历史</text>
+    <text x="1548" y="325">文件 · Git · 统计 · 后台任务</text>
+
+    <text x="1548" y="511" font-weight="600" fill="#3c2f23">⑥ 终端卡片 · radius 8px</text>
+    <text x="1548" y="529">标签栏 + 终端内容同属一张卡片</text>
+    <text x="1548" y="545">xterm.js + WebGL 渲染</text>
+    <text x="1548" y="561">PTY 不走 Tauri 事件，跑在独立守护</text>
+    <text x="1548" y="577">进程，WebSocket 二进制帧；应用退出</text>
+    <text x="1548" y="593">后任务继续，重启 attach 回放</text>
+
+    <text x="252" y="151" text-anchor="end" font-weight="600" fill="#3c2f23">② 侧栏卡片</text>
+    <text x="252" y="169" text-anchor="end">radius 8px</text>
+    <text x="252" y="185" text-anchor="end">margin 4 / 0 / 6 / 6</text>
+    <text x="252" y="201" text-anchor="end">ring #d8cfc0 @62%</text>
+    <text x="252" y="217" text-anchor="end">右边缘可拖拽调宽</text>
+
+    <text x="252" y="331" text-anchor="end" font-weight="600" fill="#3c2f23">③ 项目树</text>
+    <text x="252" y="349" text-anchor="end">单击项目行内联展开</text>
+    <text x="252" y="365" text-anchor="end">该项目的历史会话</text>
+    <text x="252" y="381" text-anchor="end">徽标 = 运行中的会话数</text>
+
+    <text x="1005" y="106" text-anchor="middle" font-weight="600" fill="#3c2f23">④ 标签栏 · h=42px · 终端卡片的顶部区域，非独立卡片</text>
+
+    <text x="1000" y="854" text-anchor="middle" font-weight="600" fill="#3c2f23">⑦ 底板 --surface #faf9f5 —— 唯一贯穿全窗口的底色</text>
+
+    <text x="542" y="878" text-anchor="middle">⑧ 中缝 6px（侧栏 margin-right:0 + well margin-left:6px）</text>
+  </g>
+
+  <!-- ══════════ 图例 ══════════ -->
+  <g transform="translate(60,916)">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="#3c2f23">配色（Claude Light）</text>
+    <g font-size="10.5" fill="#5c5044">
+      <g transform="translate(0,16)"><rect width="46" height="26" rx="4" fill="#faf9f5" stroke="#d8cfc0"/><text x="0" y="40">#faf9f5</text><text x="0" y="53" fill="#847a6d">底板</text></g>
+      <g transform="translate(62,16)"><rect width="46" height="26" rx="4" fill="#ffffff" stroke="#d8cfc0"/><text x="0" y="40">#ffffff</text><text x="0" y="53" fill="#847a6d">卡片</text></g>
+      <g transform="translate(124,16)"><rect width="46" height="26" rx="4" fill="#f5f4ed" stroke="#d8cfc0"/><text x="0" y="40">#f5f4ed</text><text x="0" y="53" fill="#847a6d">高层</text></g>
+      <g transform="translate(186,16)"><rect width="46" height="26" rx="4" fill="#e8ddd0"/><text x="0" y="40">#e8ddd0</text><text x="0" y="53" fill="#847a6d">选中</text></g>
+      <g transform="translate(248,16)"><rect width="46" height="26" rx="4" fill="#c96442"/><text x="0" y="40">#c96442</text><text x="0" y="53" fill="#847a6d">强调</text></g>
+      <g transform="translate(310,16)"><rect width="46" height="26" rx="4" fill="#d8cfc0"/><text x="0" y="40">#d8cfc0</text><text x="0" y="53" fill="#847a6d">描边</text></g>
+      <g transform="translate(372,16)"><rect width="46" height="26" rx="4" fill="#3c2f23"/><text x="0" y="40">#3c2f23</text><text x="0" y="53" fill="#847a6d">正文</text></g>
+    </g>
+  </g>
+
+  <g transform="translate(620,916)" font-size="11">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="#3c2f23">形状语言</text>
+    <g fill="#5c5044">
+      <text x="0" y="22">窗口底板 —— 唯一通栏底色，标题栏不持有自己的背景</text>
+      <text x="0" y="42">圆角卡片 —— 侧栏与终端各一张，都是 radius 8px，四周间隙统一 6px</text>
+      <text x="0" y="62">每侧只缩进一层：标签栏并入终端卡片，不再自带 margin 造成二次缩进</text>
+    </g>
+  </g>
+
+  <g transform="translate(1240,916)" font-size="11">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="#3c2f23">未采纳（方案 C）</text>
+    <g fill="#847a6d">
+      <text x="0" y="22">标题栏与标签栏合并为一条，省 26px 垂直空间</text>
+      <text x="0" y="42">删除标题栏内的图标 + 应用名（三处冗余）</text>
+      <text x="0" y="62">标题栏 26px → 32px（Windows 标准点击区）</text>
+    </g>
+  </g>
+</svg>

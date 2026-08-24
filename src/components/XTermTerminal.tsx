@@ -21,7 +21,7 @@ import {
   applyTransparency,
   getTerminalBackground,
   getTerminalBackgroundOverlayColor,
-  getTerminalMinimumContrastRatio,
+  getTerminalThemeMinimumContrastRatio,
   getTerminalTheme,
   isLightTerminalTheme,
   withTerminalTextColor,
@@ -971,7 +971,7 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
       getTerminalTheme(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette),
       terminalTextColor,
     );
-    const minimumContrastRatio = getTerminalMinimumContrastRatio(baseTheme, isTransparent);
+    const minimumContrastRatio = getTerminalThemeMinimumContrastRatio(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette, isTransparent);
     const nextTheme = isTransparent ? applyTransparency(baseTheme, background.overlayDarken) : baseTheme;
     terminal.options.theme = withVisibleSelectionTheme(nextTheme, searchOpen);
     if (terminal.options.minimumContrastRatio !== minimumContrastRatio) {
@@ -1166,12 +1166,12 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
       cursorWidth: 1,
       fontSize,
       fontFamily: effectiveFontFamily,
-      fontWeight: "normal",
+      fontWeight: 500,
       fontWeightBold: "bold",
       scrollback: effectiveTerminalScrollbackRows,
       scrollOnEraseInDisplay: true,
       allowProposedApi: true,
-      minimumContrastRatio: getTerminalMinimumContrastRatio(baseTheme, isTransparentRef.current),
+      minimumContrastRatio: getTerminalThemeMinimumContrastRatio(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette, isTransparentRef.current),
       // xterm cannot toggle transparency after construction, so keep it enabled
       // even though WebGL is disabled while a background image is active.
       allowTransparency: true,
